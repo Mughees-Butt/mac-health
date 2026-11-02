@@ -187,5 +187,19 @@ class ForgedActionLines(unittest.TestCase):
             self.assertEqual(handle.read(), before)
 
 
+
+class LastCopyLeavesList(unittest.TestCase):
+    def test_copy_left_alone_leaves_the_duplicates_list(self):
+        self.addCleanup(setattr, server, "recalculate", server.recalculate)
+        server.recalculate = lambda report: None
+        dup = lambda i, g: {"id": i, "group": g}
+        server.state["report"] = {"sections": {"duplicates": [dup("a", "g1"), dup("b", "g1"), dup("c", "g2"), dup("d", "g2"), dup("e", "g2")]}}
+        server.state["actionable"] = {k: {} for k in "abcde"}
+        server.drop_items(["a", "c"])
+        self.assertEqual([e["id"] for e in server.state["report"]["sections"]["duplicates"]], ["d", "e"])
+        self.assertNotIn("b", server.state["actionable"])
+        server.state["report"] = None
+
+
 if __name__ == "__main__":
     unittest.main()

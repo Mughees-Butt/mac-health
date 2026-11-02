@@ -662,6 +662,15 @@ def drop_items(ids):
             return
         for name, items in report["sections"].items():
             report["sections"][name] = [i for i in items if i["id"] not in ids]
+        # A copy left on its own isn't a duplicate any more, so it leaves the list instead of saying "2 copies".
+        left = report["sections"].get("duplicates", [])
+        counts = {}
+        for entry in left:
+            counts[entry["group"]] = counts.get(entry["group"], 0) + 1
+        alone = {e["id"] for e in left if counts[e["group"]] < 2}
+        report["sections"]["duplicates"] = [e for e in left if e["id"] not in alone]
+        for key in alone:
+            state["actionable"].pop(key, None)
         recalculate(report)
 
 
@@ -1036,7 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
                         "revealable": list(state["revealable"].keys()),
                         "system_items": list(state["system_items"].keys()), "brew_ready": list(state["brew_ids"]), "reinstall_ready": list(state["reinstall"].keys()),
                         "admin_network": state["admin_network"], "app_path": os.environ.get("MAC_HEALTH_APP"),
-                        "full_disk_access": access, "admin_last_used": admin_used,
+                        "full_disk_access": access, "admin_last_used": admin_used, "fresh_scan": state["scanned_at"] is not None,
                         "sealed_storage": bool(PAYLOAD and PAYLOAD.get("data_key")), "key_changed": state["key_changed"]}
                 body = to_json(data).encode("utf-8")
             return self.send_body(200, body)

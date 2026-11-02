@@ -438,7 +438,8 @@ function nudge() {
   return `<div class="nudge">${counts[view.tab] ? "<span>Done here?</span>" : "<span>All done here.</span>"}<strong>Next: ${esc(labels[next][1])} (${esc(counts[next])})</strong><span class="spacer"></span><button class="btn primary sm" data-tab="${next}">Continue ${icon("arrow")}</button></div>`;
 }
 function restoredNotice() {
-  return view.data.actionable.length || view.data.system_items.length || view.data.brew_ready.length || view.data.reinstall_ready.length || !view.data.report ? "" :
+  // Only results loaded from before this app opened are read-only. A fresh scan with nothing to act on isn't.
+  return view.data.fresh_scan || !view.data.report ? "" :
     `<div class="notice">Saved results. Scan again to turn on the action buttons.</div>`;
 }
 function tile(ic, kind, value, label, tab) {
@@ -677,7 +678,7 @@ function renderPage() {
   const report = view.data && view.data.report;
   if (!view.data) { main.innerHTML = `<div class="card empty">Loading…</div>`; return; }
   if (!report && !["technical", "history", "access"].includes(view.tab)) {
-    main.innerHTML = `<div class="card empty"><h2>Check your Mac</h2><p>It takes a couple of minutes and only reads information.</p><button class="btn primary" id="first-scan">Start your first scan</button></div>`;
+    main.innerHTML = `<div class="card empty"><h2>Check your Mac</h2><p>It takes a couple of minutes and only reads information.</p><button class="btn primary" id="first-scan" ${view.scanning ? "disabled" : ""}>${view.scanning ? "Scanning…" : "Start your first scan"}</button></div>`;
     return;
   }
   const s = sections();
@@ -910,6 +911,8 @@ document.addEventListener("change", async event => {
   if (target.dataset.select) {
     target.checked ? view.selected.add(target.dataset.select) : view.selected.delete(target.dataset.select);
     target.closest(".row").classList.toggle("selected", target.checked);
+    const stale = main.querySelector(".notice.bad");
+    if (stale) stale.remove();  // an earlier refusal no longer applies once the selection changes
     renderTray();
   } else if (target.id === "ttl") {
     try { await api("/api/settings", { technical_ttl_days: Number(target.value) }); await refresh(); }
