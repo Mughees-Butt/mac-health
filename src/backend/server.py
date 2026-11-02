@@ -245,8 +245,18 @@ def prune_jsonl(path, retention_days):
     with storage_lock:
         rows = read_jsonl(path)
         kept = [r for r in rows if r.get("t", 0) >= cutoff]
-        if len(kept) != len(rows) and may_write(path):
+        # Lines from before encryption name moved files in plain text. Rewriting keeps only sealed rows.
+        stale = path == ACTIONS_FILE and has_unsealed_lines(path)
+        if (len(kept) != len(rows) or stale) and may_write(path):
             write_private(path, "".join(encode_row(path, r) + "\n" for r in kept))
+
+
+def has_unsealed_lines(path):
+    try:
+        with open_private(path) as handle:
+            return any(line.strip() and not line.startswith(SEALED_MARK) for line in handle)
+    except (OSError, ValueError):
+        return False
 
 
 def read_json(path, fallback):
@@ -690,7 +700,10 @@ def system_item_problem(path):
     extension = SYSTEM_REMOVABLE_DIRS.get(parent)
     if extension is None or not path.endswith(extension) or os.path.normpath(path) != path or os.path.realpath(parent) != parent:
         return "This location is outside what the tool may change."
-    return None if os.path.lexists(path) else "It's already gone."
+    if not os.path.lexists(path):
+        return "It's already gone."
+    # Checked again just before the admin prompt: a file your account can change can't be trusted to name what root removes.
+    return None if scanners.protected_by_root(path) else "This file isn't protected by macOS, so Mac Health won't remove it."
 
 
 def remove_system_item(item_id):

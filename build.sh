@@ -12,17 +12,16 @@ fi
 cd "${0:A:h}"
 
 APP="Mac Health.app"
-IDENTITIES=("${(@f)$(/usr/bin/security find-certificate -a -c "Mac Health Local Signing" -Z 2>/dev/null | /usr/bin/awk '/SHA-1/{print $3}' || true)}")
-if [ -z "${IDENTITIES[1]:-}" ]; then
-  echo "The Mac Health Local Signing key is missing. Create it with ./scripts/setup-signing.sh" >&2
+# Only the exact key setup-signing.sh created and recorded, so a key with the same name made by anything else is never used.
+if [ ! -f .signing-identity ]; then
+  echo "No recorded signing key. Run ./scripts/setup-signing.sh, or --adopt if you made the key with an older Mac Health." >&2
   exit 1
 fi
-# A second key with this name could be one planted to get signed by mistake.
-if [ "${#IDENTITIES[@]}" -ne 1 ]; then
-  echo "More than one Mac Health Local Signing key exists. Check Keychain Access, because this wasn't signed." >&2
+IDENTITY="$(/bin/cat .signing-identity)"
+if ! /usr/bin/security find-certificate -a -c "Mac Health Local Signing" -Z 2>/dev/null | /usr/bin/awk '/SHA-1/{print $3}' | /usr/bin/grep -qx "$IDENTITY"; then
+  echo "The recorded signing key is missing from your keychain, so this wasn't signed. Run ./scripts/setup-signing.sh." >&2
   exit 1
 fi
-IDENTITY="${IDENTITIES[1]}"
 
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK"; rm -rf "$WORK"' EXIT

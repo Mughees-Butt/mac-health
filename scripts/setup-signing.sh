@@ -4,12 +4,30 @@
 # The key isn't opened to any program, so macOS asks before each signing. Choose Allow, not Always Allow.
 set -euo pipefail
 
+# The key it creates is recorded in .signing-identity, and build.sh signs with that exact key only. A key with
+# the same name made by anything else, for example planted before you installed, is never used.
+#   ./scripts/setup-signing.sh          create and record the key
+#   ./scripts/setup-signing.sh --adopt  record the one existing key, if you made it with an older Mac Health
 NAME="Mac Health Local Signing"
-KEYCHAIN="${1:-$HOME/Library/Keychains/login.keychain-db}"
+KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+cd "${0:A:h:h}"
+PIN=".signing-identity"
+fingerprints() { /usr/bin/security find-certificate -a -c "$NAME" -Z "$KEYCHAIN" 2>/dev/null | /usr/bin/awk '/SHA-1/{print $3}'; }
 
-if /usr/bin/security find-certificate -c "$NAME" "$KEYCHAIN" >/dev/null 2>&1; then
-  echo "The $NAME key already exists, so nothing changed."
+if [ -f "$PIN" ] && fingerprints | /usr/bin/grep -qx "$(/bin/cat "$PIN")"; then
+  echo "The $NAME key is already set up, so nothing changed."
   exit 0
+fi
+existing=("${(@f)$(fingerprints)}")
+if [ -n "${existing[1]:-}" ]; then
+  if [ "${1:-}" = "--adopt" ] && [ "${#existing[@]}" -eq 1 ]; then
+    print -r -- "${existing[1]}" > "$PIN"
+    echo "Recorded your existing $NAME key. Only that key will be used to build."
+    exit 0
+  fi
+  echo "A key named $NAME already exists, but this setup didn't record making it." >&2
+  echo "If you made it with an older Mac Health, run ./scripts/setup-signing.sh --adopt. Otherwise delete it in Keychain Access and run this again." >&2
+  exit 1
 fi
 
 umask 077
@@ -38,5 +56,6 @@ PASSWORD="$(/usr/bin/openssl rand -hex 32)"
 # Tested: -x alone still lets any program run `security export` silently, because the importing tool stays trusted.
 # Naming a harmless program as the only trusted one means both exporting and signing need your approval.
 /usr/bin/security import "$WORK/identity.p12" -k "$KEYCHAIN" -f pkcs12 -P "$PASSWORD" -x -T /usr/bin/true >/dev/null
+/usr/bin/openssl x509 -in "$WORK/cert.pem" -noout -fingerprint -sha1 | /usr/bin/sed 's/.*=//; s/://g' > "$PIN"
 
 echo "Created the $NAME key. Next, run ./build.sh"

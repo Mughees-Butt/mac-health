@@ -201,5 +201,42 @@ class LastCopyLeavesList(unittest.TestCase):
         server.state["report"] = None
 
 
+
+class RescanFindings(unittest.TestCase):
+    """Regression tests for the claude-security rescan of 2026-11-02."""
+
+    def test_only_root_protected_files_count_as_protected(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        mine = os.path.join(folder, "mine.plist")
+        open(mine, "w").close()
+        self.assertFalse(scanners.protected_by_root(mine))
+        self.assertTrue(scanners.protected_by_root("/bin/sh"))
+        self.assertFalse(scanners.protected_by_root(os.path.join(folder, "missing")))
+
+    def test_admin_removal_refuses_a_file_your_account_owns(self):
+        folder = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder)
+        self.addCleanup(setattr, server, "SYSTEM_REMOVABLE_DIRS", server.SYSTEM_REMOVABLE_DIRS)
+        server.SYSTEM_REMOVABLE_DIRS = {folder: ".plist"}
+        path = os.path.join(folder, "x.plist")
+        open(path, "w").close()
+        self.assertIn("isn't protected", server.system_item_problem(path))
+
+    def test_old_plain_log_lines_are_rewritten_away(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        self.addCleanup(setattr, server, "ACTIONS_FILE", server.ACTIONS_FILE)
+        server.ACTIONS_FILE = os.path.join(folder, "actions.jsonl")
+        with open(server.ACTIONS_FILE, "w") as handle:
+            handle.write(json.dumps({"t": time.time(), "path": "/old/Secret.mov"}) + "\n")
+        server.append_jsonl(server.ACTIONS_FILE, {"t": time.time(), "path": "/new/Secret.mov"})
+        server.prune_jsonl(server.ACTIONS_FILE, 30)
+        with open(server.ACTIONS_FILE) as handle:
+            text = handle.read()
+        self.assertNotIn("Secret", text)
+        self.assertEqual([r["path"] for r in server.read_jsonl(server.ACTIONS_FILE)], ["/new/Secret.mov"])
+
+
 if __name__ == "__main__":
     unittest.main()

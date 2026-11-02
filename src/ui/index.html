@@ -730,8 +730,8 @@ async function runFix(fix, itemId, title) {
     });
   } else if (fix.kind === "admin_remove") {
     const tech = view.data.technical[itemId] || {};
-    const files = [...(tech.system_items || []), ...(tech.user_items || [])].map(e => e.path);
-    askConfirm(`${fix.label}?`, "macOS will ask for your password to move exactly these files to Trash. Reinstalling the app recreates what it needs.", files.length ? files : [title], "Continue", false, async () => {
+    const files = [...(tech.system_items || []), ...(tech.user_items || [])].map(e => e.label ? `${e.path} (unloads ${e.label})` : e.path);
+    askConfirm(`${fix.label}?`, "macOS will ask for your password to stop and move exactly these to Trash. Reinstalling the app recreates what it needs.", files.length ? files : [title], "Continue", false, async () => {
       const result = await api("/api/remove-system", { id: itemId });
       await refresh();
       showSuccess(`Removed: ${title}. ${result.note || "Some changes finish after a restart."}`);

@@ -237,6 +237,15 @@ def full_hash(path):
     return hasher.hexdigest()
 
 
+def protected_by_root(path):
+    """Owned by root and writable by nobody else, so no program running as you could have changed it."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return info.st_uid == 0 and not info.st_mode & 0o022
+
+
 def real_folder(path):
     """A link here could make your own files look like cache or leftovers."""
     return not os.path.islink(path) and os.path.realpath(path) == path
@@ -624,6 +633,13 @@ def scan_launch_items(apps):
                 if not name.endswith(".plist"):
                     continue
                 path = os.path.join(root, name)
+                if not user_owned and not protected_by_root(path):
+                    # A system-level startup file your account can change could tell root what to remove, or run anything.
+                    results.append(item("alerts", "System startup file your account can change: %s" % name,
+                                        "Files here normally belong to macOS's administrator account. This one doesn't, so a program running as you could change what it starts.",
+                                        "high", "high", paths=[path], technical={"path": path},
+                                        action="Check that you recognise it. Mac Health won't remove it, because it can't trust what it says."))
+                    continue
                 try:
                     with open(path, "rb") as handle:
                         data = plistlib.load(handle)
@@ -660,7 +676,7 @@ def scan_launch_items(apps):
                 owners = [owners] if isinstance(owners, str) else owners
                 owned_by_installed = any(isinstance(o, str) and vendor_of(o) in vendors for o in owners) if isinstance(owners, list) else False
                 # Only a root-owned file can claim a root helper. Otherwise any program could aim the admin prompt at one.
-                if not user_owned and program.startswith("/Library/PrivilegedHelperTools/") and vendor_of(label) not in vendors and not owned_by_installed:
+                if not user_owned and program.startswith("/Library/PrivilegedHelperTools/") and protected_by_root(program) and vendor_of(label) not in vendors and not owned_by_installed:
                     state = pool.submit(launchd_state, label)
                     key = label.split(".")[1] if "." in label else label
                     helper_keys.add(key)  # a vendor match is weaker evidence than a missing program
