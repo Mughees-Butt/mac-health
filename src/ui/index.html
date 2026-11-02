@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mac Health</title>
+<style>
+/* Color has one job each: blue = act, green = healthy, amber = needs a look, red = urgent, violet = learn. Everything else is a navy tint. */
+:root {
+  color-scheme: light;
+  --bg: #e7ecf4; --surface: #f8fafd; --surface-2: #e6ebf3; --line: #cdd6e4;
+  --text: #12213b; --text-2: #40506b; --text-3: #566681;
+  --accent: #1b5fb3; --accent-fill: #1f68c2; --accent-ink: #ffffff; --accent-bg: #dbe8f8; --series: #1f68c2;
+  --good: #0b6e41; --good-bg: #d9f0e4;
+  --warn: #855500; --warn-bg: #f9ecd0; --warn-line: #e3b95f;
+  --bad: #b82525; --bad-bg: #f9e0df;
+  --violet: #5242bd; --violet-bg: #e6e4f8; --key: #5242bd; --str: #0b6e41; --num: #a54e0c;
+  --monitor: #10233f; --monitor-line: #2c4263; --monitor-text: #f1f5fb; --monitor-text-2: #b5c3d8;
+  --display: "Avenir Next", Avenir, -apple-system, "Helvetica Neue", sans-serif;
+  --rail: 196px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #141d2e; --surface: #1c2739; --surface-2: #29364c; --line: #35445e;
+    --text: #edf2fa; --text-2: #bdc9db; --text-3: #9aa9c1;
+    --accent: #79b2f5; --accent-bg: #1c3555; --series: #79b2f5;
+    --good: #5fd6a0; --good-bg: #15352a;
+    --warn: #edc064; --warn-bg: #3a2f15; --warn-line: #8a6d2a;
+    --bad: #f59393; --bad-bg: #421f22;
+    --violet: #b0a7f5; --violet-bg: #2b2857; --key: #b0a7f5; --str: #5fd6a0; --num: #efa76d;
+    --monitor: #0c1a30;
+  }
+  .monitor { border: 1px solid var(--monitor-line); }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+body { margin: 0; min-height: 100vh; display: grid; grid-template-columns: var(--rail) minmax(0, 1fr); background: var(--bg); color: var(--text); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+button, select { font: inherit; color: inherit; }
+svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; vertical-align: -3px; }
+.top { position: sticky; top: 0; z-index: 10; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+.bar { display: flex; flex-direction: column; gap: 14px; padding: 20px 10px 16px; }
+.bar nav { flex: 1; min-width: 0; }
+h1, h2, h3 { font-family: var(--display); }
+h1 { font-size: 19px; font-weight: 700; margin: 0; padding: 0 8px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 7px; }
+h1 svg.i { width: 21px; height: 21px; }
+h2 { font-size: 28px; font-weight: 700; line-height: 1.15; margin: 0; letter-spacing: -0.015em; }
+h3 { font-size: 16px; font-weight: 600; margin: 0; }
+dialog h2 { font-size: 22px; }
+.spacer { flex: 1; }
+.muted { color: var(--text-2); }
+.small { font-size: 13px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; }
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--accent-ink); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.1); background: var(--accent-fill); }
+.btn.danger { background: #b82525; border-color: #b82525; color: #fff; font-weight: 600; }
+.btn.sm { padding: 5px 11px; font-size: 13px; }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .tab:focus-visible, .tile-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+nav { display: flex; flex-direction: column; gap: 1px; }
+.tab { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; background: none; border: 0; border-radius: 7px; cursor: pointer; color: var(--text-2); white-space: nowrap; font-size: 14px; text-align: left; }
+.tab svg.i { width: 15px; height: 15px; }
+.tab:hover { background: var(--surface-2); }
+.tab[aria-selected="true"] { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
+.tab[data-tab="alerts"], .tab[data-tab="history"] { margin-top: 14px; }
+.count { margin-left: auto; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--surface-2); font-size: 11px; line-height: 18px; text-align: center; font-weight: 700; }
+.tab[aria-selected="true"] .count:not(.bad):not(.warn) { background: var(--bg); }
+.count.bad { background: #b82525; color: #fff; }
+.count.warn { background: var(--warn-bg); color: var(--warn); }
+main { width: 100%; max-width: 1020px; margin: 0 auto; padding: 32px 36px 110px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.page-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
+/* A badge is a colored icon, never a filled block. */
+.badge { display: inline-flex; align-items: center; justify-content: center; width: 24px; flex: none; color: var(--text-3); font-family: var(--display); }
+.badge.good { color: var(--good); }
+.badge.warn { color: var(--warn); }
+.badge.bad { color: var(--bad); }
+.badge.act { color: var(--accent); }
+.badge.learn { color: var(--violet); }
+.page-head > div { flex: 1 1 220px; min-width: 0; }
+.page-head .badge svg.i { width: 24px; height: 24px; }
+.sub { font-size: 13px; color: var(--text-2); }
+.page-head .sub { font-size: 14px; margin-top: 2px; }
+/* The monitor is the one bold thing: dark in both themes, like the screen beside a hospital bed. */
+.monitor { --tone: #62e0a6; background: var(--monitor); color: var(--monitor-text); border-radius: 18px; padding: 26px 28px 20px; }
+.monitor.warn { --tone: #f5c563; }
+.monitor.bad { --tone: #ff9a9a; }
+.mon-head { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: flex-start; justify-content: space-between; }
+.mon-head h2 { font-size: 32px; }
+.mon-sub { margin-top: 4px; font-size: 14px; color: var(--monitor-text-2); max-width: 62ch; }
+.mon-read { display: flex; align-items: flex-end; gap: 22px; margin-top: 12px; }
+.score { font: 700 112px/.92 var(--display); letter-spacing: -0.045em; font-variant-numeric: lining-nums; color: var(--tone); flex: none; }
+.trace { display: block; flex: 1; min-width: 0; height: 96px; }
+.trace.draw { animation: trace 1.4s ease-out both; }
+@keyframes trace { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } }
+@media (prefers-reduced-motion: reduce) { .trace.draw { animation: none; } }
+.mon-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--monitor-line); font-size: 13px; color: var(--monitor-text-2); }
+.monitor .btn:not(.primary) { background: none; border-color: var(--monitor-line); color: var(--monitor-text); }
+.monitor .btn:not(.primary):hover { background: var(--monitor-line); }
+.monitor .btn:focus-visible { outline-color: #fff; }
+.monitor .btn.primary { background: #2672cf; border-color: #2672cf; }
+.next { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 14px 0; padding: 14px 18px; box-shadow: inset 3px 0 0 var(--accent); }
+.next-text { flex: 1; min-width: 220px; }
+.next-text h3 { font-size: 18px; }
+/* One ruled panel of readings, not a grid of separate cards. */
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.tiles.three { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
+.tile, .tile.btn { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; background: none; border: 0; border-radius: 0; margin: 0 -1px -1px 0; box-shadow: inset -1px -1px 0 var(--line); padding: 14px 16px; min-width: 0; text-align: left; width: auto; }
+.tile-link { cursor: pointer; }
+.tile.btn:hover { background: var(--surface-2); }
+.tile-link:focus-visible { outline-offset: -3px; }
+.tile .badge { width: auto; }
+.tile b { display: block; font: 600 21px/1.2 var(--display); letter-spacing: -0.01em; }
+.tile span.lab { display: block; font-size: 12.5px; color: var(--text-2); margin-top: 1px; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 14px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pill svg.i { width: 12px; height: 12px; }
+.pill.high { background: var(--bad-bg); color: var(--bad); }
+.pill.medium { background: var(--warn-bg); color: var(--warn); }
+.pill.low { background: var(--accent-bg); color: var(--accent); }
+.pill.safe { background: var(--good-bg); color: var(--good); }
+.pill.neutral { background: var(--surface-2); color: var(--text-2); }
+.pill.violet { background: var(--violet-bg); color: var(--violet); }
+.row-list { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 11px; align-items: center; padding: 13px 16px; border-top: 1px solid var(--line); }
+.row:first-child { border-top: 0; }
+.row.sev-high { box-shadow: inset 3px 0 0 var(--bad); }
+.row.sev-medium, .row.outlier { box-shadow: inset 3px 0 0 var(--warn-line); }
+.row.selected { background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent); }
+.row input[type=checkbox] { width: 17px; height: 17px; margin: 0; accent-color: var(--accent-fill); }
+.row-title { font-weight: 600; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.row-side { display: flex; align-items: center; gap: 10px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.row-body { grid-column: 2 / 4; font-size: 14px; color: var(--text-2); }
+.row .badge { font-size: 20px; font-weight: 700; }
+.hint { display: flex; gap: 5px; align-items: flex-start; margin-top: 3px; font-size: 13px; color: var(--violet); }
+.hint svg.i { width: 14px; height: 14px; margin-top: 2px; }
+details { margin-top: 4px; font-size: 13px; }
+summary { cursor: pointer; color: var(--text-3); }
+pre { margin: 6px 0 0; padding: 10px; border-radius: 8px; background: var(--surface-2); overflow-x: auto; font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.k { color: var(--key); } .s { color: var(--str); } .n { color: var(--num); }
+.group-title { display: flex; align-items: center; gap: 6px; margin: 22px 0 8px; font: 600 15px var(--display); color: var(--text-2); }
+.clear { display: flex; align-items: center; gap: 12px; padding: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.clear .badge svg.i { width: 24px; height: 24px; }
+.clear h3 { font-size: 18px; }
+.nudge { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+.empty { padding: 32px; text-align: center; color: var(--text-2); }
+.notice { padding: 9px 14px; border-radius: 10px; background: var(--accent-bg); margin-bottom: 12px; font-size: 14px; }
+.notice.bad { background: var(--bad-bg); }
+.notice.ok { background: var(--good-bg); }
+.notice.warn { background: var(--warn-bg); }
+.tray { position: fixed; z-index: 10; left: var(--rail); right: 0; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 36px; background: var(--surface); border-top: 1px solid var(--line); }
+.progress { margin-top: auto; padding: 12px 18px; }
+.progress-bar { height: 5px; border-radius: 4px; background: var(--surface-2); overflow: hidden; margin-top: 5px; }
+.progress-bar div { height: 100%; border-radius: 4px; background: var(--series); transition: width .4s; }
+dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--text); max-width: 620px; width: calc(100% - 32px); padding: 22px; }
+dialog::backdrop { background: rgba(12,26,48,.55); }
+dialog ul { max-height: 240px; overflow: auto; padding-left: 18px; font-size: 14px; }
+.dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.result { display: flex; gap: 8px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.result:first-child { border-top: 0; }
+.perm { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px 11px; align-items: center; padding: 11px 0; border-top: 1px solid var(--line); }
+.perm:first-of-type { border-top: 0; }
+.perm-side { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 14px; }
+.check-list { list-style: none; margin: 8px 0 0; padding: 0; font-size: 14px; }
+.check-list li { display: flex; gap: 7px; padding: 3px 0; }
+.check-list svg.i { width: 15px; height: 15px; margin-top: 3px; }
+.steps { margin: 8px 0 0; padding-left: 20px; font-size: 14px; }
+.table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+.table th, .table td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); }
+.table th { color: var(--text-2); font-weight: 500; font-size: 13px; }
+.chart-wrap { position: relative; }
+.chart-wrap svg { display: block; width: 100%; height: 150px; }
+.grid-line { stroke: var(--line); stroke-width: 1; }
+.axis { display: flex; justify-content: space-between; color: var(--text-3); font-size: 12px; margin-top: 2px; }
+.chart-tip { position: absolute; pointer-events: none; padding: 5px 9px; border-radius: 7px; background: var(--text); color: var(--bg); font-size: 12px; white-space: nowrap; transform: translate(-50%, -115%); display: none; }
+/* Narrow windows: the rail becomes a pinned strip that scrolls sideways. */
+@media (max-width: 820px) {
+  body { display: block; }
+  .top { height: auto; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); background: var(--bg); }
+  .bar { gap: 6px; padding: 10px 0 6px; }
+  h1 { padding: 0 16px; font-size: 17px; }
+  nav { flex-direction: row; overflow-x: auto; padding: 0 10px; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  .tab { width: auto; flex: none; }
+  .tab[aria-selected="true"] { box-shadow: inset 0 -3px 0 var(--accent); }
+  .tab[data-tab="alerts"], .tab[data-tab="history"] { margin-top: 0; margin-left: 10px; }
+  .count { margin-left: 2px; }
+  .progress { margin-top: 0; padding: 6px 16px 10px; }
+  main { padding: 22px 24px 110px; }
+  .tray { left: 0; padding: 10px 24px; }
+}
+@media (max-width: 640px) {
+  main { padding-left: 16px; padding-right: 16px; }
+  .tray { padding: 10px 16px; }
+  h2 { font-size: 24px; }
+  .monitor { padding: 20px 18px 16px; }
+  .mon-head h2 { font-size: 26px; }
+  .mon-read { flex-direction: column; align-items: stretch; gap: 8px; }
+  .score { font-size: 84px; }
+  .trace { flex: none; width: 100%; height: 66px; }
+  .tiles, .tiles.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile, .tile.btn { padding: 12px 14px; }
+  .tile b { font-size: 18px; }
+  .row { grid-template-columns: auto minmax(0, 1fr); padding: 12px 14px; }
+  .row-side { grid-column: 2; order: 3; white-space: normal; flex-wrap: wrap; margin-top: 6px; }
+  .row-side:empty { display: none; }
+  .row-body { grid-column: 2; }
+  .perm { grid-template-columns: auto minmax(0, 1fr); }
+  .perm-side { grid-column: 2; justify-content: flex-start; }
+}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="bar"><h1 id="brand"></h1><nav id="tabs" role="tablist" aria-label="Pages" aria-orientation="vertical"></nav></div>
+  <div class="progress" id="progress" hidden>
+    <div id="progress-stage" class="small muted"></div>
+    <div class="progress-bar" id="progress-meter" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-fill" style="width:0"></div></div>
+  </div>
+</div>
+<main id="main" role="tabpanel"></main>
+<div id="live" class="sr-only" role="status" aria-live="polite"></div>
+<div class="tray" id="tray" hidden>
+  <strong id="tray-text"></strong>
+  <span class="muted small">Goes to Trash, so you can restore it.</span>
+  <span class="spacer"></span>
+  <button class="btn" id="tray-clear">Clear</button>
+  <button class="btn primary" id="tray-go">Review and move to Trash</button>
+</div>
+<dialog id="confirm">
+  <h2 id="confirm-title"></h2>
+  <p class="muted small" id="confirm-body"></p>
+  <ul id="confirm-list"></ul>
+  <div class="dialog-actions">
+    <button class="btn" id="confirm-cancel">Cancel</button>
+    <button class="btn primary" id="confirm-go"></button>
+  </div>
+</dialog>
+<dialog id="job">
+  <h2 tabindex="-1" autofocus>Homebrew updates</h2>
+  <div id="job-summary" style="margin-top:8px"></div>
+  <details id="job-details"><summary>Show the full log</summary><pre id="job-log" style="max-height:280px;overflow:auto"></pre></details>
+  <div class="dialog-actions" id="job-actions"></div>
+</dialog>
+<script>
+"use strict";
+const TOKEN = location.hash.slice(1);
+// Icons are drawn inline, so this stays one self-contained page with nothing downloaded.
+const PATHS = {
+  pulse: '<path d="M3 12h4l2.5-6 4 12 2.5-6h5"/>',
+  home: '<path d="M4 11l8-7 8 7"/><path d="M6 10v9h12v-9"/>',
+  bell: '<path d="M6 16V10a6 6 0 0 1 12 0v6l2 2H4z"/><path d="M10 21h4"/>',
+  ghost: '<path d="M5 21V10a7 7 0 0 1 14 0v11l-3-2-2 2-2-2-2 2-2-2z"/><path d="M9.5 10h.01M14.5 10h.01"/>',
+  broom: '<path d="M14 4l6 6"/><path d="M17 7l-7 7"/><path d="M10 11l3 3-3 6H4v-6z"/>',
+  code: '<path d="M8 8l-5 4 5 4M16 8l5 4-5 4M14 5l-4 14"/>',
+  files: '<path d="M8 3h8l4 4v11H8z"/><path d="M16 3v4h4"/><path d="M4 7v14h11"/>',
+  power: '<path d="M12 3v9"/><path d="M6.5 7a8 8 0 1 0 11 0"/>',
+  wifi: '<path d="M3 9a14 14 0 0 1 18 0"/><path d="M6.5 13a9 9 0 0 1 11 0"/><path d="M10 17a4 4 0 0 1 4 0"/><path d="M12 20h.01"/>',
+  list: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
+  terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>',
+  check: '<path d="M4 12.5l5 5L20 6.5"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  warn: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  disk: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.300 8-3V6"/><path d="M4 12c0 1.700 3.600 3 8 3s8-1.300 8-3"/>',
+  memory: '<rect x="3" y="7" width="18" height="10" rx="1"/><path d="M7 11v2M11 11v2M15 11v2M7 17v3M12 17v3M17 17v3"/>',
+  cpu: '<rect x="7" y="7" width="10" height="10" rx="1"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>',
+  battery: '<rect x="3" y="8" width="16" height="9" rx="2"/><path d="M22 11v3M7 11v3M11 11v3"/>',
+  refresh: '<path d="M20 11a8 8 0 0 0-14-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14 4l2-2"/><path d="M20 20v-5h-5"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.500 8-8 9-4.500-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  down: '<path d="M12 4v15M6 13l6 6 6-6"/>',
+  up: '<path d="M12 20V5M6 11l6-6 6 6"/>',
+  update: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 20h16"/>',
+  finder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  chip: '<path d="M4 18l5-6 4 4 7-9"/>',
+};
+function icon(name) { return `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${PATHS[name] || ""}</svg>`; }
+const TABS = [
+  ["overview", "Overview", "home"], ["alerts", "Alerts", "bell"], ["leftovers", "Leftovers", "ghost"], ["clutter", "Cleanup", "broom"],
+  ["developer", "Developer", "code"], ["files", "Files", "files"], ["startup", "Startup", "power"], ["network", "Network", "wifi"],
+  ["tips", "Next steps", "list"], ["history", "History", "chip"], ["access", "Access", "key"], ["technical", "Technical", "terminal"],
+];
+const view = { tab: "overview", data: null, history: null, selected: new Set(), wasScanning: false, pending: null, message: null };
+const main = document.getElementById("main");
+document.getElementById("brand").innerHTML = icon("pulse") + "Mac Health";
+
+// Scan results include file names from disk, so all values are escaped before display.
+function esc(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function size(bytes) {
+  if (bytes == null) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return (unit < 2 ? Math.round(value) : value.toFixed(1)) + " " + units[unit];
+}
+function when(seconds) {
+  return new Date(seconds * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+async function api(path, body) {
+  const options = { headers: { "X-Token": TOKEN } };
+  if (body !== undefined) {
+    options.method = "POST";
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "The request failed.");
+  return data;
+}
+// Only these count toward a page's number. Everything else stays listed for when you want to look.
+function needsAttention(item) { return !!item.fix && item.fix.kind === "brew"; }
+function sections() { return view.data && view.data.report ? view.data.report.sections : null; }
+function allItems() { const s = sections(); return s ? Object.values(s).flat() : []; }
+// How many things on each page still want attention. Pages with zero are finished.
+function openCounts() {
+  const s = sections();
+  if (!s) return {};
+  return { alerts: s.alerts.length, leftovers: s.leftovers.length, clutter: s.clutter.length, developer: s.developer.filter(needsAttention).length,
+    files: s.large.length + s.duplicates.length, startup: s.startup.filter(i => i.enabled && i.missing).length,
+    network: s.network.filter(i => i.severity === "medium" || i.severity === "high").length, tips: view.data.report.tips.length };
+}
+function renderTabs() {
+  const counts = openCounts();
+  const s = sections();
+  const kind = { alerts: s && s.alerts.some(i => i.severity === "high") ? "bad" : "warn", leftovers: "warn", tips: "warn" };
+  document.getElementById("tabs").innerHTML = TABS.map(([id, label, ic]) =>
+    `<button class="tab" role="tab" id="tab-${id}" data-tab="${id}" aria-controls="main" tabindex="${view.tab === id ? 0 : -1}" aria-selected="${view.tab === id}">${icon(ic)}${esc(label)}${counts[id] ? `<span class="count ${kind[id] || ""}">${counts[id]}</span>` : ""}</button>`
+  ).join("");
+  main.setAttribute("aria-labelledby", "tab-" + view.tab);
+  // Keeps the current page in view when the tabs scroll sideways in a narrow window.
+  const selected = document.querySelector('.tab[aria-selected="true"]');
+  if (selected) selected.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+function pill(kind, text, ic) { return `<span class="pill ${esc(kind)}">${ic ? icon(ic) : ""}${esc(text)}</span>`; }
+function severityPill(level) {
+  return { high: pill("high", "Urgent", "warn"), medium: pill("medium", "Needs a look", "warn") }[level] || "";
+}
+function confidencePill(text) {
+  const map = { "safe": ["safe", "Safe to remove", "check"], "review": ["medium", "Check first", "info"],
+    "very likely": ["safe", "Very likely leftover", "check"], "likely": ["violet", "Likely leftover"], "uncertain": ["medium", "Uncertain", "info"], "exact match": ["violet", "Exact copy"] };
+  return text && map[text] ? pill(map[text][0], map[text][1], map[text][2]) : "";
+}
+function colorJson(value) {
+  return esc(JSON.stringify(value, null, 2))
+    .replace(/(&quot;(?:[^&]|&(?!quot;))*&quot;)(\s*:)/g, '<span class="k">$1</span>$2')
+    .replace(/(:\s*|^\s*)(&quot;(?:[^&]|&(?!quot;))*&quot;)/gm, '$1<span class="s">$2</span>')
+    .replace(/(:\s*)(-?\d+(?:\.\d+)?|true|false|null)/g, '$1<span class="n">$2</span>');
+}
+function technicalBlock(item) {
+  const tech = view.data.technical && view.data.technical[item.id];
+  if (!tech || !Object.keys(tech).length) return "";
+  const { command, ...rest } = tech;
+  return `<details><summary>How this was found</summary>${command ? `<pre><span class="k">$</span> ${esc(command)}</pre>` : ""}<pre>${colorJson(rest)}</pre></details>`;
+}
+// Saved results are read-only: these fixes need the scan that found them.
+function actionReady(fix, id) {
+  if (fix.kind === "admin_remove") return view.data.system_items.includes(id);
+  if (fix.kind === "brew_reinstall") return view.data.reinstall_ready.includes(id);
+  if (fix.kind === "brew_remove") return view.data.brew_ready.includes(id);
+  if (fix.kind === "brew") return view.data.brew_ready.length > 0;
+  return true;
+}
+function row(item, extraPills) {
+  const canAct = item.trashable && view.data.actionable.includes(item.id);
+  const checked = view.selected.has(item.id);
+  const fixReady = item.fix && actionReady(item.fix, item.id);
+  const fixIcon = { brew: "update", brew_remove: "terminal", brew_reinstall: "terminal", admin_remove: "x", settings: "arrow" }[item.fix && item.fix.kind] || "arrow";
+  const side = (item.size ? `<span>${size(item.size)}</span>` : "") +
+    (fixReady ? `<button class="btn ${item.fix.kind === "brew_remove" ? "" : "primary"} sm" data-fix-item="${esc(item.id)}">${icon(fixIcon)}${esc(item.fix.label)}</button>` : "") +
+    (item.locked && view.data.revealable.includes(item.id) ? `<button class="btn sm" data-reveal="${esc(item.id)}">${icon("finder")}Show in Finder</button>` : "");
+  return `<div class="row ${checked ? "selected" : ""} ${item.outlier ? "outlier" : ""} ${item.severity === "high" || item.severity === "medium" ? "sev-" + item.severity : ""}">
+    <span>${canAct ? `<input type="checkbox" data-select="${esc(item.id)}" aria-label="Select ${esc(item.title)}${item.group ? ", " + esc(item.plain) : ""}" ${checked ? "checked" : ""}>` : ""}</span>
+    <div class="row-title">${esc(item.title)}${severityPill(item.severity)}${confidencePill(item.confidence)}${item.outlier ? pill("medium", "Outlier", "warn") : ""}${item.locked ? pill("neutral", "Protected", "lock") : ""}${extraPills || ""}</div>
+    <div class="row-side">${side}</div>
+    <div class="row-body">${esc(item.plain)}
+      ${item.action ? `<div class="hint">${icon("info")}<span>${esc(item.action)}</span></div>` : ""}
+      ${technicalBlock(item)}</div>
+  </div>`;
+}
+// A check that failed or stopped early can't back up a page saying everything is fine.
+const GAP_TABS = { "App list": ["alerts", "leftovers"], "App signatures": ["alerts"], "Gatekeeper check": ["alerts"], "Startup items": ["alerts", "leftovers"],
+  "Audio drivers": ["leftovers"], "App leftovers": ["leftovers"], "Temporary files": ["clutter"], "Developer tools": ["developer"], "Homebrew": ["developer"],
+  "File search": ["files", "developer"], "Home folder file search": ["files", "developer"], "Duplicate check": ["files"], "Network": ["network"],
+  "~/Library/Caches": ["clutter", "leftovers"], "~/Library/Logs": ["clutter", "leftovers"], "~/Downloads": ["clutter"], "~/.Trash": ["clutter"] };
+function checkGaps(tab) {
+  const report = view.data && view.data.report;
+  if (!report) return [];
+  return report.coverage.filter(c => {
+    if (c.area === "Protected app data") return false;  // this limits removing, not checking
+    if (tab === "overview") return c.fix !== "fda";  // those have their own button
+    return (GAP_TABS[c.area] || (c.area.startsWith("~/Library/") ? ["leftovers"] : [])).includes(tab);
+  });
+}
+function gapNotice() {
+  const gaps = checkGaps(view.tab);
+  const areas = [...new Set(gaps.map(g => g.area))];
+  return areas.length ? `<div class="notice warn">${icon("warn")} Not fully checked: ${esc(areas.length > 3 ? plural(areas.length, "area") : areas.join(", "))}. Scan again.</div>` : "";
+}
+function allClear(title, message) {
+  if (view.tab !== "overview" && checkGaps(view.tab).length) {
+    return `<div class="clear"><span class="badge warn">${icon("warn")}</span><div><h3>Couldn't confirm this</h3><div class="sub">Part of this check didn't finish, so nothing found here doesn't mean all clear.</div></div></div>`;
+  }
+  return `<div class="clear"><span class="badge good">${icon("check")}</span><div><h3>${esc(title)}</h3><div class="sub">${esc(message)}</div></div></div>`;
+}
+function list(items, clearTitle, clearMessage) {
+  return items.length ? `<div class="row-list">${items.map(i => row(i)).join("")}</div>` : allClear(clearTitle, clearMessage);
+}
+function head(ic, title, sub, kind, right) {
+  return `<div class="page-head"><span class="badge ${kind || ""}">${icon(ic)}</span><div><h2>${esc(title)}</h2>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div><span class="spacer"></span>${right || ""}</div>`;
+}
+function selectSafe(items) {
+  const safe = items.filter(i => i.confidence === "safe" && i.trashable && view.data.actionable.includes(i.id));
+  return safe.length ? `<button class="btn sm" data-select-many="${esc(safe.map(i => i.id).join(","))}">${icon("check")}Select ${safe.length} safe</button>` : "";
+}
+function total(items) { const t = items.reduce((sum, i) => sum + (i.size || 0), 0); return t ? size(t) : ""; }
+// After finishing a page, point to the next one that still has something to do.
+function nudge() {
+  const order = ["alerts", "leftovers", "clutter", "developer", "files", "startup", "network", "tips"];
+  if (!order.includes(view.tab)) return "";
+  const counts = openCounts();
+  const start = order.indexOf(view.tab);
+  const next = order.slice(start + 1).find(t => counts[t]);
+  const labels = Object.fromEntries(TABS.map(t => [t[0], t]));
+  if (!next) return `<div class="nudge"><span class="badge good">${icon("check")}</span><strong>That's everything for this scan.</strong><span class="spacer"></span><button class="btn sm" data-tab="overview">Back to Overview</button></div>`;
+  return `<div class="nudge">${counts[view.tab] ? "<span>Done here?</span>" : "<span>All done here.</span>"}<strong>Next: ${esc(labels[next][1])} (${counts[next]})</strong><span class="spacer"></span><button class="btn primary sm" data-tab="${next}">Continue ${icon("arrow")}</button></div>`;
+}
+function restoredNotice() {
+  return view.data.actionable.length || view.data.system_items.length || view.data.brew_ready.length || view.data.reinstall_ready.length || !view.data.report ? "" :
+    `<div class="notice">Saved results. Scan again to turn on the action buttons.</div>`;
+}
+function tile(ic, kind, value, label, tab) {
+  const body = `<span class="badge ${kind || ""}">${icon(ic)}</span><div style="min-width:0"><b>${esc(value)}</b><span class="lab">${esc(label)}</span></div>`;
+  return tab ? `<button class="tile tile-link btn" data-tab="${tab}">${body}</button>` : `<div class="tile">${body}</div>`;
+}
+function scoreColor(score) { return score >= 85 ? "var(--good)" : score >= 65 ? "var(--warn)" : "var(--bad)"; }
+// The pulse line is real data: one beat per recent scan, as tall as that scan's score.
+function trace(score) {
+  const rows = (view.history && view.history.history) || [];
+  const scores = (rows.length ? rows.slice(-14).map(r => Number(r.score) || 0) : [score]);
+  const W = 600, H = 96, base = 76, step = W / scores.length;
+  const beats = scores.map((value, i) => {
+    const x = step * i + step / 2, top = base - value / 100 * 70;
+    return `L${(x - 9).toFixed(1)} ${base} L${(x - 5).toFixed(1)} ${base + 3} L${x.toFixed(1)} ${top.toFixed(1)} L${(x + 5).toFixed(1)} ${base + 12} L${(x + 9).toFixed(1)} ${base}`;
+  }).join(" ");
+  const draw = view.traced ? "" : "draw";
+  view.traced = true;
+  return `<svg class="trace ${draw}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Health score over the last ${plural(scores.length, "scan")}"><path d="M0 ${base} ${beats} L${W} ${base}" fill="none" stroke="var(--tone)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function renderOverview() {
+  const r = view.data.report, c = r.cards, s = r.sections;
+  const verdict = r.score >= 85 ? "Your Mac is healthy" : r.score >= 65 ? "Your Mac needs some attention" : "Your Mac needs attention now";
+  const worth = r.tips.filter(t => t.priority !== "low");
+  const sentence = r.deductions.length ? r.deductions.map(d => `${d.reason} (−${d.points})`).join(" · ")
+    : worth.length ? `${plural(worth.length, "thing")} can still be tidied up.` : "Nothing needs your attention.";
+  const next = r.tips.find(t => t.fix) || null;
+  const recoverable = [...s.clutter, ...s.developer, ...s.leftovers].filter(i => i.trashable && ["safe", "very likely", "likely"].includes(i.confidence)).reduce((a, i) => a + (i.size || 0), 0);
+  const high = s.alerts.filter(i => i.severity === "high").length;
+  const sec = c.security, on = [sec.filevault, sec.gatekeeper, sec.sip, sec.firewall];
+  const secOn = on.filter(v => v === true).length;
+  const b = c.battery, busy = c.cpu.busy_pct;
+  const tone = r.score >= 85 ? "" : r.score >= 65 ? "warn" : "bad";
+  return `<section class="monitor ${tone}">
+      <div class="mon-head"><div><h2>${esc(verdict)}</h2><div class="mon-sub">${esc(sentence)}</div></div>
+        <button class="btn primary" id="scan" ${view.scanning ? "disabled" : ""}>${icon("refresh")}${view.scanning ? "Scanning…" : "Scan now"}</button></div>
+      <div class="mon-read"><div class="score" role="img" aria-label="Health score ${esc(r.score)} out of 100">${esc(r.score)}</div>${trace(r.score)}</div>
+      <div class="mon-foot"><span>Last scan ${esc(when(r.generated_at))}</span><span>Each beat is one scan</span><span class="spacer"></span>${r.coverage.some(g => g.fix === "fda") ? `<button class="btn sm" data-tab="access">${icon("lock")}Some folders weren't checked</button>` : ""}</div>
+    </section>
+    ${next ? `<div class="card next"><div class="next-text"><h3>${esc(next.title)}</h3><div class="sub">${esc(next.why)}</div></div>${tipFixButton(next)}</div>` : `<div style="height:14px"></div>`}
+    <div class="tiles">
+      ${tile("bell", s.alerts.length ? (high ? "bad" : "warn") : "good", s.alerts.length ? `${s.alerts.length} to review` : "No alerts", "Apps and startup checks", "alerts")}
+      ${tile("broom", recoverable ? "act" : "good", recoverable ? size(recoverable) : "All tidy", recoverable ? "Space you could recover" : "Nothing likely to recover", "clutter")}
+      ${tile("disk", c.disk.used_pct >= 90 ? "bad" : c.disk.used_pct >= 80 ? "warn" : "good", `${size(c.disk.free)} free`, `${c.disk.used_pct}% used`)}
+      ${tile("memory", c.memory.free_pct == null ? "" : c.memory.free_pct < 15 ? "bad" : c.memory.free_pct < 30 ? "warn" : "good", c.memory.free_pct == null ? "—" : `${c.memory.free_pct}% free`, `${size(c.memory.total)} memory`)}
+      ${tile("cpu", busy == null ? "" : busy >= 90 ? "warn" : "good", busy == null ? "—" : `${busy}% busy`, busy >= 40 && c.cpu.explanation ? c.cpu.explanation.split(",")[0] : "Processor, before the scan")}
+      ${tile("battery", !b ? "" : ["Good", "Normal"].includes(b.condition) ? "good" : "warn", b ? (b.condition || "—") : "No battery", b ? `${b.max_capacity || "?"} · ${b.cycles} cycles` : "")}
+      ${tile("update", c.updates == null ? "" : c.updates.length ? "warn" : "good", c.updates == null ? "Unknown" : c.updates.length ? `${c.updates.length} waiting` : "Up to date", `macOS ${c.macos}`)}
+      ${tile("shield", secOn === 4 ? "good" : "warn", `${secOn} of 4 on`, secOn === 4 ? "All protections on" : on.includes(false) ? "Protection is off" : "Some unknown", "tips")}
+    </div>`;
+}
+function renderFiles() {
+  const s = sections();
+  const groups = {};
+  s.duplicates.forEach(i => (groups[i.group] = groups[i.group] || []).push(i));
+  const wasted = Object.values(groups).reduce((sum, g) => sum + (g[0].size || 0) * (g.length - 1), 0);
+  return head("files", "Large files", s.large.length ? `Over 500 MB · ${total(s.large)}` : "", s.large.length ? "act" : "good") +
+    list(s.large, "No oversized files", "Nothing in your home folder is over 500 MB.") +
+    `<div style="height:18px"></div>` + head("files", "Duplicates", wasted ? `${size(wasted)} recoverable. One copy of each must stay.` : "", wasted ? "act" : "good") +
+    (Object.keys(groups).length ? Object.values(groups).map(g => `<div class="group-title">${g.length} copies of ${esc(g[0].title)}</div><div class="row-list">${g.map(i => row(i)).join("")}</div>`).join("") : allClear("No duplicates", "No files over 20 MB are stored twice."));
+}
+function renderDeveloper() {
+  const s = sections(), attention = s.developer.filter(needsAttention), optional = s.developer.filter(i => !needsAttention(i));
+  const sub = attention.length ? plural(attention.length, "thing") + " to do" : optional.length ? "Nothing needs you. These are here if you want them." : "";
+  return head("code", "Developer tools", sub, attention.length ? "act" : "good", selectSafe(s.developer)) +
+    (attention.length ? `<div class="row-list">${attention.map(i => row(i)).join("")}</div>` : "") +
+    (optional.length ? `<div class="group-title">${icon("info")}Optional${total(optional) ? ` · ${total(optional)}` : ""}</div><div class="row-list">${optional.map(i => row(i)).join("")}</div>` : "") +
+    (s.developer.length ? "" : allClear("All tidy", "Nothing large or outdated was found."));
+}
+function renderNetwork() {
+  const items = sections().network;
+  const open = items.filter(i => i.severity !== "info"), active = items.filter(i => i.severity === "info");
+  const admin = view.data.admin_network;
+  const shown = new Set(open.map(i => (view.data.technical[i.id] || {}).process));
+  const extra = (admin || []).filter(a => !shown.has(a.process));
+  const connectionRow = i => row(i, pill("neutral", plural(i.connections, "connection"), "up"));
+  return head("wifi", "Network", "A snapshot, so it changes minute to minute.", "") +
+    `<div class="group-title">${icon("down")}Waiting for others to connect in</div>
+    ${list(open, "Nothing found listening", "None of your apps is waiting for connections. System services only show with the admin check.")}
+    ${admin ? `<div class="group-title">${icon("key")}Found only by your admin check</div>
+      ${extra.length ? `<div class="sub" style="margin-bottom:6px">System services you can't see without your password. They're usually normal.</div><div class="card"><table class="table"><thead><tr><th>Service</th><th>Port</th></tr></thead><tbody>${extra.map(a => `<tr><td>${esc(a.process)}</td><td>${esc(a.ports.join(", "))}</td></tr>`).join("")}</tbody></table></div>` : allClear("Nothing hidden", "Your admin check found nothing beyond what's listed above.")}` : ""}
+    <div class="group-title">${icon("up")}Connected out from your Mac</div>
+    ${active.length ? `<div class="row-list">${active.map(connectionRow).join("")}</div>` : allClear("No active connections", "No app is connected online right now.")}`;
+}
+function renderStartup() {
+  const items = sections().startup, on = items.filter(i => i.enabled), off = items.filter(i => !i.enabled);
+  const startupRow = i => {
+    const status = i.missing ? pill("medium", "Program missing", "warn")
+      : i.memory ? pill(i.memory > 300 * 1048576 ? "medium" : "safe", `Running · ${size(i.memory)}`, "memory")
+      : i.enabled ? pill("neutral", "Not running now") : pill("neutral", "Turned off");
+    const note = [i.behavior, i.advice].filter(Boolean).join(" ");
+    const copy = Object.assign({}, i, { action: i.missing ? "Its app is gone. Remove it on the Leftovers page." : note || null });
+    return row(copy, status);
+  };
+  if (view.data.report.coverage.some(c => c.area === "Startup list")) {
+    return head("power", "Startup list unavailable", "macOS didn't return it in time, so this doesn't mean nothing starts on its own. Scan again.", "warn", `<button class="btn primary sm" data-pane="login_items">${icon("arrow")}Open Login Items</button>`);
+  }
+  return head("power", `${on.length} start on their own`, "Rated by what's measurable: running or not, and memory used right now.", "", `<button class="btn primary sm" data-pane="login_items">${icon("arrow")}Open Login Items</button>`) +
+    (on.length ? `<div class="row-list">${on.map(startupRow).join("")}</div>` : allClear("Nothing runs on its own", "No startup or background items were found.")) +
+    (off.length ? `<details style="margin-top:12px"><summary>${plural(off.length, "item")} turned off</summary><div class="row-list" style="margin-top:8px">${off.map(startupRow).join("")}</div></details>` : "");
+}
+function tipFixButton(t) {
+  if (!t.fix || !actionReady(t.fix, null)) return "";
+  const index = view.data.report.tips.indexOf(t);
+  return `<button class="btn primary sm" data-fix-tip="${index}">${icon("arrow")}${esc(t.fix.label)}</button>`;
+}
+function renderTips() {
+  const tips = view.data.report.tips;
+  const right = `<button class="btn sm" id="recheck">${icon("refresh")}Check again</button>`;
+  if (!tips.length) return head("list", "Next steps", "", "good", right) + allClear("Things look good", "Nothing needs you right now. The other pages are there if you want to look around.");
+  return head("list", `${plural(tips.length, "step")} left`, "Updates as you act. Check again runs a fresh scan.", "act", right) +
+    `<div class="row-list">${tips.map((t, n) => `<div class="row">
+      <span class="badge ${t.priority === "high" ? "bad" : t.priority === "medium" ? "warn" : ""}">${n + 1}</span>
+      <div class="row-title">${esc(t.title)}${t.days_waiting >= 1 ? pill("medium", `Waiting ${plural(t.days_waiting, "day")}`, "clock") : ""}</div>
+      <div class="row-side">${tipFixButton(t)}</div>
+      <div class="row-body">${esc(t.plain)}<div class="hint">${icon("info")}<span>${esc(t.why)}</span></div></div>
+    </div>`).join("")}</div>`;
+}
+function permRow(ic, kind, name, note, status, statusKind, button) {
+  return `<div class="perm"><span class="badge ${kind}">${icon(ic)}</span><div><strong>${esc(name)}</strong><div class="sub">${esc(note)}</div></div><div class="perm-side">${pill(statusKind, status, statusKind === "safe" ? "check" : null)}${button || ""}</div></div>`;
+}
+function renderAccess() {
+  const d = view.data, r = d.report, fda = d.full_disk_access;
+  const admin = d.admin_last_used;
+  const can = r ? r.can_do : [], cannot = r ? r.limits : [];
+  const inApp = !!d.app_path;
+  return head("key", "Access", "What Mac Health has been given, and what it hasn't.", "") +
+    `<div class="card" style="margin-bottom:10px">
+      ${permRow("disk", fda ? "good" : "warn", "Full Disk Access", fda ? "Can read and clean protected folders." : "Add Mac Health in System Settings, then reopen it.", fda ? "Granted" : "Not granted", fda ? "safe" : "medium",
+        `<button class="btn sm" data-pane="fda">${fda ? "Manage" : "Open Settings"}</button>${!fda && inApp ? `<button class="btn sm" id="reveal-app">Show app</button>` : ""}`)}
+      ${permRow("key", "act", "Admin password", admin ? `Not kept. Last asked ${when(admin)}.` : "Not kept. Only asked for when you approve an action.", "Asked each time", "neutral",
+        `<button class="btn sm" id="admin-network">Run network check</button>`)}
+      ${permRow("wifi", "good", "Network", "The dashboard only works on this Mac. Homebrew updates go online when you ask.", "Local only", "safe")}
+      ${permRow("lock", "good", "Your data", "Stored results can only be read by your account.", "Private", "safe")}
+    </div>
+    <div class="two" style="margin-bottom:10px">
+      <div class="card"><h3>What it can do</h3><ul class="check-list">${can.map(c => `<li style="color:var(--text)"><span style="color:var(--good)">${icon("check")}</span>${esc(c)}</li>`).join("")}</ul></div>
+      <div class="card"><h3>What it can't do</h3><ul class="check-list">${cannot.map(c => `<li><span style="color:var(--text-3)">${icon("x")}</span>${esc(c)}</li>`).join("")}</ul></div>
+    </div>
+    <details class="card" style="margin-top:0"><summary>How this stays private</summary>
+      <ul class="steps"><li>Full Disk Access belongs to this app alone, not Terminal.</li><li>It checks its files before running, refuses if they changed, and then runs that checked code from memory.</li><li>A copy not signed by your private key can't use its access, and signing needs your approval.</li><li>Its secret token stays in memory and is never saved.</li><li>macOS asks for your password directly, so this app never sees it.</li></ul></details>`;
+}
+function renderTechnical() {
+  const d = view.data;
+  const choices = d.ttl_choices.map(n => `<option value="${n}" ${n === d.ttl_days ? "selected" : ""}>${plural(n, "day")}</option>`).join("");
+  const left = d.technical_expires_at ? Math.max(0, Math.ceil((d.technical_expires_at - Date.now() / 1000) / 86400)) : null;
+  return head("terminal", "Technical summary", d.technical_expires_at ? `Deleted automatically on ${when(d.technical_expires_at)}.` : "Run a scan to create one.", "learn", left != null ? pill("violet", `${plural(left, "day")} left`, "clock") : "") +
+    `<div class="card" style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <label class="small" for="ttl">Delete after</label>
+        <select id="ttl" class="btn sm">${choices}</select>
+        ${d.technical_expires_at ? `<button class="btn sm" id="tech-delete">Delete now</button>` : ""}
+      </div>
+    ${d.system ? `<div class="card"><h3>System readings</h3><pre>${colorJson(d.system)}</pre></div>` : ""}`;
+}
+function historyChart(id, title, rows, valueOf, format, fixedMax) {
+  const W = 640, H = 150, L = 8, R = 8, T = 12, B = 8;
+  const values = rows.map(valueOf);
+  const low = fixedMax != null ? 0 : Math.min(...values) * 0.97;
+  const high = fixedMax != null ? fixedMax : Math.max(...values) * 1.03 || 1;
+  const x = i => rows.length === 1 ? W / 2 : L + i * (W - L - R) / (rows.length - 1);
+  const y = v => T + (1 - (v - low) / ((high - low) || 1)) * (H - T - B);
+  const points = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const fmt = s => new Date(s * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `<div class="card"><h3>${esc(title)}</h3><div class="small muted">Latest: ${esc(format(values[values.length - 1]))}</div>
+    <div class="chart-wrap" data-chart="${id}">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(title)} over time">
+      <line class="grid-line" x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}"/>
+      ${rows.length > 1 ? `<polyline points="${points}" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` : ""}
+      ${values.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="${rows.length === 1 ? 4 : 0}" fill="var(--series)"/>`).join("")}
+      ${rows.map((r, i) => `<rect x="${(x(i) - Math.max(10, (W / rows.length) / 2)).toFixed(1)}" y="0" width="${Math.max(20, W / rows.length).toFixed(1)}" height="${H}" fill="transparent" data-tip="${esc(fmt(r.t) + ": " + format(values[i]))}" data-px="${(x(i) / W * 100).toFixed(2)}" data-py="${(y(values[i]) / H * 100).toFixed(2)}"/>`).join("")}
+    </svg><div class="chart-tip"></div></div>
+    <div class="axis"><span>${esc(fmt(rows[0].t))}</span>${rows.length > 1 ? `<span>${esc(fmt(rows[rows.length - 1].t))}</span>` : ""}</div></div>`;
+}
+function renderHistory() {
+  const rows = (view.history && view.history.history) || [];
+  if (!rows.length) return `<div class="card empty">Your trends appear after your first scan.</div>`;
+  const recent = rows.slice().reverse().slice(0, 20);
+  const first = rows[0], last = rows[rows.length - 1];
+  const scoreChange = last.score - first.score, diskChange = last.disk_used - first.disk_used;
+  const summary = rows.length < 2 ? `<div class="notice">One scan so far. Scan on another day to see a trend.</div>` : `<div class="tiles three">
+    ${tile("pulse", scoreChange >= 0 ? "good" : "warn", `${scoreChange > 0 ? "+" : ""}${scoreChange} points`, `Score: ${first.score} to ${last.score}`)}
+    ${tile("disk", diskChange <= 0 ? "good" : "act", `${diskChange > 0 ? "+" : "−"}${size(Math.abs(diskChange))}`, diskChange <= 0 ? "Disk space freed" : "Disk use added")}
+    ${tile("clock", "", String(rows.length), `Scans, kept ${view.history.retention_days} days`)}
+  </div>`;
+  return head("chip", "History", "", "") + summary + `<div class="charts">
+      ${historyChart("score", "Health score", rows, r => r.score, v => v + " / 100", 100)}
+      ${historyChart("disk", "Disk space used", rows, r => r.disk_used, size)}
+    </div>
+    <div class="card"><div style="overflow-x:auto"><table class="table"><thead><tr><th>Date</th><th>Score</th><th>Disk used</th><th>Alerts</th><th>Leftovers</th><th>Cleanup</th><th>Developer</th></tr></thead>
+      <tbody>${recent.map(r => `<tr><td>${esc(when(r.t))}</td><td style="color:${scoreColor(r.score)};font-weight:600">${esc(r.score)}</td><td>${size(r.disk_used)}</td><td>${esc(r.alerts)}</td><td>${size(r.leftovers_size)}</td><td>${size(r.clutter_size)}</td><td>${size(r.developer_size)}</td></tr>`).join("")}</tbody></table></div></div>`;
+}
+function bindCharts() {
+  main.querySelectorAll("[data-chart]").forEach(wrap => {
+    const tip = wrap.querySelector(".chart-tip");
+    wrap.querySelectorAll("rect[data-tip]").forEach(rect => {
+      rect.addEventListener("mouseenter", () => {
+        tip.textContent = rect.dataset.tip;
+        tip.style.left = rect.dataset.px + "%";
+        tip.style.top = (Number(rect.dataset.py) / 100 * 150) + "px";
+        tip.style.display = "block";
+      });
+      rect.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+    });
+  });
+}
+
+// Each render replaces the page, so return keyboard focus to the same control afterwards.
+function focusedControl() {
+  const el = document.activeElement;
+  if (!el || el === document.body) return null;
+  for (const attr of ["data-fix-item", "data-fix-tip", "data-reveal", "data-select", "data-select-many", "data-pane"]) {
+    if (el.hasAttribute(attr)) return `[${attr}="${CSS.escape(el.getAttribute(attr))}"]`;
+  }
+  if (el.classList.contains("tab")) return `.tab[data-tab="${CSS.escape(el.dataset.tab)}"]`;
+  return el.id ? "#" + CSS.escape(el.id) : null;
+}
+function render() {
+  const control = focusedControl();
+  renderPage();
+  if (control) {
+    const again = document.querySelector(control);
+    if (again) again.focus({ preventScroll: true });
+  }
+}
+function renderPage() {
+  renderTabs();
+  const report = view.data && view.data.report;
+  if (!view.data) { main.innerHTML = `<div class="card empty">Loading…</div>`; return; }
+  if (!report && !["technical", "history", "access"].includes(view.tab)) {
+    main.innerHTML = `<div class="card empty"><h2>Check your Mac</h2><p>It takes a couple of minutes and only reads information.</p><button class="btn primary" id="first-scan">Start your first scan</button></div>`;
+    return;
+  }
+  const s = sections();
+  const views = {
+    overview: renderOverview,
+    alerts: () => head("bell", "Alerts", s.alerts.length ? "Unusual, not necessarily harmful." : "", s.alerts.length ? "warn" : "good") + list(s.alerts, "No alerts", "Your apps and startup items passed every check."),
+    leftovers: () => head("ghost", "Leftovers", s.leftovers.length ? `From apps no longer installed${total(s.leftovers) ? ` · ${total(s.leftovers)}` : ""}` : "", s.leftovers.length ? "warn" : "good", selectSafe(s.leftovers)) + list(s.leftovers, "No leftovers", "No traces of removed apps were found."),
+    clutter: () => head("broom", "Cleanup", s.clutter.length ? `Temporary files · ${total(s.clutter)}` : "", s.clutter.length ? "act" : "good", selectSafe(s.clutter)) + list(s.clutter, "Nothing to clean up", "Caches, logs and old installers are all small."),
+    developer: renderDeveloper,
+    files: renderFiles, startup: renderStartup, network: renderNetwork, tips: renderTips, history: renderHistory, access: renderAccess, technical: renderTechnical,
+  };
+  main.innerHTML = (report ? restoredNotice() + gapNotice() : "") + (view.message ? `<div class="notice ${view.message.kind}">${esc(view.message.text)}</div>` : "") + views[view.tab]() + (report ? nudge() : "");
+  view.message = null;
+  if (view.tab === "history") bindCharts();
+  renderTray();
+}
+function renderTray() {
+  const chosen = allItems().filter(i => view.selected.has(i.id));
+  document.getElementById("tray").hidden = !chosen.length;
+  const bytes = chosen.reduce((a, i) => a + (i.size || 0), 0);
+  document.getElementById("tray-text").textContent = `${chosen.length} selected${bytes ? ` · ${size(bytes)}` : ""}`;
+}
+function announce(message) { document.getElementById("live").textContent = message; }
+function showError(message) { view.message = { kind: "bad", text: message }; render(); announce(message); window.scrollTo(0, 0); }
+function showSuccess(message) { view.message = { kind: "ok", text: "✓ " + message }; render(); announce(message); window.scrollTo(0, 0); }
+function askConfirm(title, body, items, goLabel, danger, action) {
+  document.getElementById("confirm-title").textContent = title;
+  document.getElementById("confirm-body").textContent = body;
+  document.getElementById("confirm-list").innerHTML = items.map(i => `<li>${esc(i)}</li>`).join("");
+  const go = document.getElementById("confirm-go");
+  go.textContent = goLabel;
+  go.className = "btn " + (danger ? "danger" : "primary");
+  view.pending = action;
+  document.getElementById("confirm").showModal();
+}
+async function runFix(fix, itemId, title) {
+  if (fix.kind === "settings") await api("/api/open-settings", { pane: fix.pane });
+  else if (fix.kind === "tab") { view.tab = fix.tab; render(); window.scrollTo(0, 0); }
+  else if (fix.kind === "admin" && fix.action === "firewall_on") {
+    askConfirm("Turn on the firewall?", "macOS will ask for your password. Apps you've already allowed keep working.", [], "Continue", false, async () => {
+      const result = await api("/api/firewall-on", {});
+      await refresh();
+      result.ok ? showSuccess("The firewall is on.") : showError("macOS didn't confirm the change.");
+    });
+  } else if (fix.kind === "admin_remove") {
+    askConfirm(`${fix.label}?`, "macOS will ask for your password. The files go to Trash, and reinstalling the app recreates what it needs.", [title], "Continue", false, async () => {
+      const result = await api("/api/remove-system", { id: itemId });
+      await refresh();
+      showSuccess(`Removed: ${title}. ${result.note || "Some changes finish after a restart."}`);
+    });
+  } else if (fix.kind === "brew_reinstall") {
+    askConfirm(`${fix.label}?`, fix.detail, [title.replace(" has a damaged signature", "")], "Open Terminal", false, async () => {
+      await api("/api/brew-reinstall", { id: itemId });
+      showSuccess("Terminal is open. When it finishes, come back and scan again.");
+    });
+  } else if (fix.kind === "brew_remove") {
+    askConfirm(`${fix.label}?`, fix.detail, fix.names || [title.replace(" can't update", "")], "Open Terminal", false, async () => {
+      await api("/api/brew-remove", { id: itemId });
+      showSuccess("Terminal is open. When it finishes, come back and scan again.");
+    });
+  } else if (fix.kind === "brew") {
+    askConfirm(`Install ${plural(fix.packages, "Homebrew update")}?`, fix.detail, [], "Update now", false, async () => {
+      await api("/api/brew-upgrade", {});
+      document.getElementById("job").showModal();
+      watchJob(0);
+    });
+  }
+}
+function jobResults(job) {
+  const s = job.summary;
+  if (job.running) return `<div class="result">${icon("refresh")}<span>Updating. You can keep using your Mac.</span></div>`;
+  if (!s) return `<div class="result">${icon("warn")}<span>This stopped with an error. The log shows why.</span></div>`;
+  const line = (ic, color, text) => `<div class="result"><span style="color:var(--${color})">${icon(ic)}</span><span>${text}</span></div>`;
+  const out = [];
+  if (s.updated) out.push(line("check", "good", `<strong>${plural(s.updated, "package")} updated.</strong>`));
+  if (s.needs_password.length) out.push(line("key", "warn", `<strong>${esc(s.needs_password.join(", "))}</strong> install${s.needs_password.length === 1 ? "s" : ""} system-wide, so it needs your password. Finish in Terminal, where only macOS's sudo sees it.`));
+  if (s.disabled.length) out.push(line("info", "violet", `<strong>${esc(s.disabled.join(", "))}</strong> can't update because Homebrew has stopped supporting ${s.disabled.length === 1 ? "it" : "them"}. The Developer page explains what to do.`));
+  if (s.failed.length) out.push(line("x", "bad", `<strong>${esc(s.failed.join(", "))}</strong> failed. The log shows why.`));
+  if (s.tools_problem) out.push(line("warn", "warn", `Homebrew mentioned Command Line Tools. If this keeps failing, run <code>xcode-select --install</code> in Terminal.`));
+  if (!out.length) out.push(line("check", "good", "<strong>Nothing new to install.</strong>"));
+  return out.join("");
+}
+async function watchJob(failures) {
+  let job;
+  try {
+    job = await api("/api/job");
+  } catch (error) {
+    // A brief hiccup shouldn't end the dialog, but it mustn't spin forever either.
+    if (failures < 5) { setTimeout(() => watchJob(failures + 1), 2000); return; }
+    document.getElementById("job-summary").innerHTML = `<div class="result">${icon("warn")}<span>Lost contact with the update. Reopen Mac Health to check the result.</span></div>`;
+    document.getElementById("job-actions").innerHTML = `<button class="btn" id="job-close">Close</button>`;
+    return;
+  }
+  const log = document.getElementById("job-log");
+  log.textContent = job.log;
+  log.scrollTop = log.scrollHeight;
+  document.getElementById("job-summary").innerHTML = jobResults(job);
+  const s = job.summary || {};
+  document.getElementById("job-actions").innerHTML = job.running ? "" :
+    `${(s.needs_password || []).length ? `<button class="btn primary" id="brew-terminal">${icon("terminal")}Finish in Terminal</button>` : ""}
+     <button class="btn" id="job-close">Close</button>`;
+  if (job.running) { setTimeout(() => watchJob(0), 1000); return; }
+  announce("Homebrew update finished.");
+  await refresh();
+}
+
+async function refresh() {
+  view.data = await api("/api/report");
+  if (view.data.report) {
+    const ids = new Set(view.data.actionable);
+    view.selected = new Set([...view.selected].filter(id => ids.has(id)));
+  } else view.selected.clear();
+  view.history = await api("/api/history");
+  render();
+}
+async function poll() {
+  let wait = 4000;
+  try {
+    const status = await api("/api/status");
+    if (status.scanning) wait = 1000;
+    document.getElementById("progress").hidden = !status.scanning;
+    if (view.scanning !== status.scanning) {
+      view.scanning = status.scanning;
+      if (!status.scanning || view.tab === "overview") render();
+    }
+    if (status.scanning) {
+      document.getElementById("progress-stage").textContent = status.stage || "";
+      document.getElementById("progress-fill").style.width = status.percent + "%";
+      document.getElementById("progress-meter").setAttribute("aria-valuenow", status.percent);
+    }
+    if (view.wasScanning && !status.scanning) {
+      view.wasScanning = false;
+      await refresh();
+      if (status.error) showError(status.error); else announce("Scan finished.");
+    }
+    view.wasScanning = status.scanning;
+  } catch (error) {
+    // One failed check must not end progress updates, so the next one still runs.
+  } finally {
+    setTimeout(poll, wait);
+  }
+}
+async function startScan() {
+  await api("/api/scan", {});
+  view.selected.clear();
+  view.wasScanning = true;
+  view.scanning = true;
+  document.getElementById("progress").hidden = false;
+  render();
+}
+
+document.addEventListener("click", async event => {
+  const target = event.target.closest("button") || event.target;
+  try {
+    if (target.dataset.tab) { view.tab = target.dataset.tab; render(); window.scrollTo(0, 0); }
+    else if (["scan", "first-scan", "recheck"].includes(target.id)) await startScan();
+    else if (target.dataset.selectMany) { target.dataset.selectMany.split(",").forEach(id => view.selected.add(id)); render(); }
+    else if (target.dataset.reveal) await api("/api/reveal", { id: target.dataset.reveal });
+    else if (target.dataset.pane) await api("/api/open-settings", { pane: target.dataset.pane });
+    else if (target.dataset.fixItem) {
+      const item = allItems().find(i => i.id === target.dataset.fixItem);
+      await runFix(item.fix, item.id, item.title);
+    }
+    else if (target.dataset.fixTip !== undefined) {
+      const tip = view.data.report.tips[Number(target.dataset.fixTip)];
+      await runFix(tip.fix, null, tip.title);
+    }
+    else if (target.id === "reveal-app") await api("/api/reveal-app", {});
+    else if (target.id === "admin-network") {
+      await api("/api/admin-network", {});
+      await refresh();
+      showSuccess("Network check finished. The results are on the Network page.");
+    }
+    else if (target.id === "tray-clear") { view.selected.clear(); render(); }
+    else if (target.id === "tech-delete") { await api("/api/technical/delete", {}); await refresh(); }
+    else if (target.id === "job-close") document.getElementById("job").close();
+    else if (target.id === "brew-terminal") { await api("/api/brew-terminal", {}); document.getElementById("job").close(); showSuccess("Terminal is open. After it finishes, choose Scan now."); }
+    else if (target.id === "tray-go") {
+      const chosen = allItems().filter(i => view.selected.has(i.id));
+      askConfirm(`Move ${plural(chosen.length, "item")} to Trash?`, "To undo, open Trash in Finder and choose Put Back. Some apps may need setting up again.",
+        chosen.map(i => i.title + (i.size ? ` · ${size(i.size)}` : "")), "Move to Trash", true, async () => {
+          const ids = [...view.selected];
+          const result = await api("/api/trash", { ids });
+          view.selected.clear();
+          await refresh();
+          const failed = result.results.filter(r => !r.ok);
+          if (failed.length) {
+            const names = failed.map(f => (allItems().find(i => i.id === f.id) || { title: f.failures[0].name }).title);
+            const reasons = [...new Set(failed.flatMap(f => f.failures.map(x => x.reason)))];
+            showError(`${failed.length} of ${ids.length} couldn't be fully moved: ${names.join(", ")}. Reason: ${reasons.join("; ")}.`);
+          } else showSuccess(`${plural(ids.length, "item")} moved to Trash.`);
+        });
+    }
+    else if (target.id === "confirm-cancel") { view.pending = null; document.getElementById("confirm").close(); }
+    else if (target.id === "confirm-go") {
+      const action = view.pending;
+      view.pending = null;
+      document.getElementById("confirm").close();
+      if (action) await action();
+    }
+  } catch (error) { showError(error.message); }
+});
+// Arrow keys move between pages, so the page list is one stop when tabbing through the window.
+document.getElementById("tabs").addEventListener("keydown", event => {
+  const ids = TABS.map(t => t[0]);
+  const at = ids.indexOf(view.tab);
+  const next = { ArrowDown: at + 1, ArrowRight: at + 1, ArrowUp: at - 1, ArrowLeft: at - 1, Home: 0, End: ids.length - 1 }[event.key];
+  if (next === undefined) return;
+  event.preventDefault();
+  view.tab = ids[(next + ids.length) % ids.length];
+  render();
+  document.getElementById("tab-" + view.tab).focus();
+  window.scrollTo(0, 0);
+});
+document.addEventListener("change", async event => {
+  const target = event.target;
+  if (target.dataset.select) {
+    target.checked ? view.selected.add(target.dataset.select) : view.selected.delete(target.dataset.select);
+    target.closest(".row").classList.toggle("selected", target.checked);
+    renderTray();
+  } else if (target.id === "ttl") {
+    try { await api("/api/settings", { technical_ttl_days: Number(target.value) }); await refresh(); }
+    catch (error) { showError(error.message); }
+  }
+});
+render();
+refresh().catch(error => showError(error.message));
+poll();
+</script>
+</body>
+</html>

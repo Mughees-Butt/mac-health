@@ -1,0 +1,32 @@
+#!/bin/zsh
+# Opens Mac Health from the terminal and starts a scan.
+# Always opens through macOS, so the app keeps its own Full Disk Access instead of acting through Terminal.
+set -u
+APP="${0:A:h:h}/Mac Health.app"
+
+case "${1:-}" in
+  "") SCAN=1 ;;
+  --no-scan) SCAN=0 ;;
+  -h|--help)
+    print "Usage: machealth [--no-scan]"
+    print "Opens Mac Health and starts a scan. Results appear in its window."
+    print "  --no-scan   Open it with your saved results, without scanning."
+    exit 0 ;;
+  *) print -u2 "Unknown option: $1. Try machealth --help."; exit 2 ;;
+esac
+
+if [ ! -d "$APP" ]; then
+  print -u2 "Mac Health.app wasn't found at $APP. Build it with build.sh."
+  exit 1
+fi
+
+if pgrep -x MacHealth >/dev/null; then
+  /usr/bin/open "$APP" || exit 1
+  [ "$SCAN" = 1 ] && "$APP/Contents/MacOS/MacHealth" --request-scan
+elif [ "$SCAN" = 1 ]; then
+  /usr/bin/open "$APP" --args --scan || exit 1
+else
+  /usr/bin/open "$APP" || exit 1
+fi
+
+if [ "$SCAN" = 1 ]; then print "Mac Health is open and scanning."; else print "Mac Health is open."; fi

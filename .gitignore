@@ -1,0 +1,5 @@
+Mac Health.app/
+Claude/
+.DS_Store
+__pycache__/
+*.pyc
