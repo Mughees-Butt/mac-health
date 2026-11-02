@@ -35,7 +35,8 @@ EOF
 PASSWORD="$(/usr/bin/openssl rand -hex 32)"
 /usr/bin/openssl pkcs12 -export -inkey "$WORK/key.pem" -in "$WORK/cert.pem" -name "$NAME" \
   -out "$WORK/identity.p12" -passout "pass:$PASSWORD"
-# -x means the private key can't be exported from the keychain afterwards.
-/usr/bin/security import "$WORK/identity.p12" -k "$KEYCHAIN" -f pkcs12 -P "$PASSWORD" -x >/dev/null
+# Tested: -x alone still lets any program run `security export` silently, because the importing tool stays trusted.
+# Naming a harmless program as the only trusted one means both exporting and signing need your approval.
+/usr/bin/security import "$WORK/identity.p12" -k "$KEYCHAIN" -f pkcs12 -P "$PASSWORD" -x -T /usr/bin/true >/dev/null
 
 echo "Created the $NAME key. Next, run ./build.sh"

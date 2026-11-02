@@ -6,6 +6,7 @@
 // The token travels the same way and is never written to disk.
 import Cocoa
 import CryptoKit
+import Security
 import WebKit
 
 // Runs only code the app has already verified. Fixed text inside this signed binary.
@@ -20,6 +21,67 @@ exec(compile(payload["files"]["server.py"], "server.py", "exec"), {"__name__": "
 
 private let pythonPath = "/Library/Developer/CommandLineTools/usr/bin/python3"
 private let scanRequest = Notification.Name("local.machealth.scan-request")
+
+// Encrypts saved results. The item trusts only this app, so macOS asks you before any other program reads it.
+// An item that's open to every program, isn't in the expected format or wasn't made for this app is replaced,
+// because another program could have planted it to know the key. One planted with this app as its only
+// trusted program before Mac Health first ran can't be told apart.
+private let dataKeyQuery: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                           kSecAttrService as String: "local.machealth.data-key",
+                                           kSecAttrAccount as String: "saved-results"]
+
+private func trustedData(_ app: SecTrustedApplication) -> Data? {
+    var data: CFData?
+    return SecTrustedApplicationCopyData(app, &data) == errSecSuccess ? data as Data? : nil
+}
+
+private func thisApp() -> SecTrustedApplication? {
+    var app: SecTrustedApplication?
+    return SecTrustedApplicationCreateFromPath(nil, &app) == errSecSuccess ? app : nil
+}
+
+private func onlyThisAppMayRead(_ item: SecKeychainItem) -> Bool {
+    var access: SecAccess?
+    guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess, let access = access,
+          let me = thisApp(), let mine = trustedData(me),
+          let lists = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt) as? [SecACL], !lists.isEmpty else { return false }
+    for list in lists {
+        var apps: CFArray?
+        var description: CFString?
+        var prompt = SecKeychainPromptSelector()
+        // No list at all means every program may read it.
+        guard SecACLCopyContents(list, &apps, &description, &prompt) == errSecSuccess,
+              let trusted = apps as? [SecTrustedApplication],
+              trusted.allSatisfy({ trustedData($0) == mine }) else { return false }
+    }
+    return true
+}
+
+private func savedDataKey() -> String? {
+    var query = dataKeyQuery
+    query[kSecReturnData as String] = true
+    query[kSecReturnRef as String] = true
+    var found: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &found)
+    if status == errSecSuccess, let result = found as? [String: Any], let data = result[kSecValueData as String] as? Data {
+        let key = String(decoding: data, as: UTF8.self)
+        let wellFormed = key.count == 64 && key.allSatisfy { "0123456789abcdef".contains($0) }
+        if wellFormed, let ref = result[kSecValueRef as String], onlyThisAppMayRead(ref as! SecKeychainItem) { return key }
+        guard SecItemDelete(dataKeyQuery as CFDictionary) == errSecSuccess else { return nil }
+    } else if status != errSecItemNotFound {
+        return nil
+    }
+    var bytes = [UInt8](repeating: 0, count: 32)
+    guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess, let me = thisApp() else { return nil }
+    var access: SecAccess?
+    guard SecAccessCreate("Mac Health saved results" as CFString, [me] as CFArray, &access) == errSecSuccess, let access = access else { return nil }
+    let key = bytes.map { String(format: "%02x", $0) }.joined()
+    var item = dataKeyQuery
+    item[kSecAttrLabel as String] = "Mac Health saved results"
+    item[kSecValueData as String] = Data(key.utf8)
+    item[kSecAttrAccess as String] = access
+    return SecItemAdd(item as CFDictionary, nil) == errSecSuccess ? key : nil
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     private var window: NSWindow!
@@ -103,7 +165,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         server = process
         stdinPipe = input
-        guard let body = try? JSONSerialization.data(withJSONObject: ["token": token, "files": files]) else {
+        var payload: [String: Any] = ["token": token, "files": files]
+        if let key = savedDataKey() { payload["data_key"] = key }
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             fail("Mac Health couldn't start its local service.")
             return
         }

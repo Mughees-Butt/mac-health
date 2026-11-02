@@ -1,6 +1,7 @@
 """Checks for the behaviour most likely to mislead someone: false all-clears and unsafe removals.
 They use a temporary home folder and a fake brew, so they don't touch real results or change the Mac."""
 import os
+import base64
 import json
 import plistlib
 import shutil
@@ -345,6 +346,62 @@ class SavedData(unittest.TestCase):
         self.assertTrue(os.path.exists(other))
 
 
+class Sealing(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder)
+        self.addCleanup(setattr, server, "DATA_KEY", server.DATA_KEY)
+        self.path = os.path.join(self.folder, "latest.json")
+
+    def test_round_trip_has_no_readable_names(self):
+        server.write_sealed(self.path, {"title": "Secret Project.mov"}, "report")
+        with open(self.path) as handle:
+            self.assertNotIn("Secret", handle.read())
+        self.assertEqual(server.read_sealed(self.path, None, "report"), {"title": "Secret Project.mov"})
+
+    def test_long_text_round_trips(self):
+        text = "é" * 100000
+        self.assertEqual(server.unseal(server.seal(text, "x"), "x"), text)
+
+    def test_same_text_seals_differently(self):
+        self.assertNotEqual(server.seal("same", "x"), server.seal("same", "x"))
+
+    def test_tampering_wrong_use_or_wrong_key_is_refused(self):
+        sealed = server.seal("hello", "report")
+        body = base64.b64decode(sealed[len(server.SEALED_MARK):])
+        changed = server.SEALED_MARK + base64.b64encode(body[:-1] + bytes([body[-1] ^ 1])).decode()
+        self.assertIsNone(server.unseal(changed, "report"))
+        self.assertIsNone(server.unseal(sealed, "technical"))
+        self.assertIsNone(server.unseal('{"plain": true}', "report"))
+        self.assertIsNone(server.unseal(server.SEALED_MARK + "not base64!", "report"))
+        server.DATA_KEY = b"another key"
+        self.assertIsNone(server.unseal(sealed, "report"))
+
+    def test_action_log_is_sealed_and_old_rows_convert(self):
+        self.addCleanup(setattr, server, "ACTIONS_FILE", server.ACTIONS_FILE)
+        server.ACTIONS_FILE = os.path.join(self.folder, "actions.jsonl")
+        now = time.time()
+        with open(server.ACTIONS_FILE, "w") as handle:
+            handle.write(json.dumps({"t": now, "path": "/old/Secret.mov"}) + "\n")
+        server.append_jsonl(server.ACTIONS_FILE, {"t": now, "path": "/new/Secret.mov"})
+        self.assertEqual(len(server.read_jsonl(server.ACTIONS_FILE)), 2)
+        server.prune_jsonl(server.ACTIONS_FILE, 30)
+        with open(server.ACTIONS_FILE) as handle:
+            self.assertNotIn("Secret", handle.read())
+        self.assertEqual(len(server.read_jsonl(server.ACTIONS_FILE)), 2)
+
+    def test_plain_saved_results_are_removed(self):
+        self.addCleanup(setattr, server, "PLAIN_FILE", server.PLAIN_FILE)
+        server.PLAIN_FILE = self.path
+        with open(self.path, "w") as handle:
+            handle.write('{"score": 100}')
+        server.remove_unsealed_results()
+        self.assertFalse(os.path.exists(self.path))
+        server.write_sealed(self.path, {"score": 100}, "report")
+        server.remove_unsealed_results()
+        self.assertTrue(os.path.exists(self.path))
+
+
 class StartupFiles(unittest.TestCase):
     def setUp(self):
         self.folder = os.path.join(HOME, "Library", "LaunchAgents")
@@ -459,8 +516,96 @@ class RootCommand(unittest.TestCase):
         server.remove_system_item("e")
         self.assertIn("'l;touch /tmp/x'", commands[0])
         self.assertIn("$(id)", commands[0].split("/bin/mv -n ")[1].split("\"$HOLD\"")[0].split("'")[1])
-        self.assertIn("find -d", commands[0])
+        self.assertIn("-maxdepth 1", commands[0])
+        self.assertNotIn("find -d", commands[0])
         self.assertIn("-links 1", commands[0])
+
+
+class ScanFindings(unittest.TestCase):
+    """Regression tests for the claude-security findings of 2026-11-02."""
+
+    def test_folder_name_cannot_fake_a_gatekeeper_verdict(self):
+        self.addCleanup(setattr, scanners, "run", scanners.run)
+        path = "/Users/x/Applications/Tools: accepted/Bad.app"
+        scanners.run = lambda *a, **k: (3, path + ": rejected\nsource=Unnotarized Developer ID\n")
+        self.assertIs(scanners.gatekeeper_verdict(path)["accepted"], False)
+        scanners.run = lambda *a, **k: (0, "/Applications/Good.app: accepted\nsource=Notarized Developer ID\n")
+        self.assertIs(scanners.gatekeeper_verdict("/Applications/Good.app")["accepted"], True)
+        scanners.run = lambda *a, **k: (3, path + ": accepted\n")  # disagrees with the exit code
+        self.assertIsNone(scanners.gatekeeper_verdict(path)["accepted"])
+
+    def test_linked_cache_folder_is_skipped(self):
+        documents = os.path.join(HOME, "Documents-test")
+        os.makedirs(documents, exist_ok=True)
+        with open(os.path.join(documents, "big.bin"), "wb") as handle:
+            handle.write(b"x" * (2 * scanners.MB))
+        caches = os.path.join(HOME, "Library", "Caches")
+        if os.path.isdir(caches) and not os.path.islink(caches):
+            shutil.rmtree(caches)
+        os.makedirs(os.path.dirname(caches), exist_ok=True)
+        os.symlink(documents, caches)
+        self.addCleanup(os.remove, caches)
+        coverage = []
+        rows = scanners.scan_clutter(coverage)
+        self.assertFalse([r for r in rows if "big.bin" in r["title"] or documents in str(r["paths"])])
+        self.assertTrue(any("link" in c["note"] for c in coverage))
+
+    def test_move_refused_when_its_folder_becomes_a_link(self):
+        real = tempfile.mkdtemp(dir=HOME)
+        self.addCleanup(shutil.rmtree, real, True)
+        os.makedirs(real + "/a")
+        open(real + "/a/item", "w").close()
+        protected = tempfile.mkdtemp(dir=HOME)
+        self.addCleanup(shutil.rmtree, protected, True)
+        open(protected + "/item", "w").close()
+        os.rename(real + "/a", real + "/moved")
+        os.symlink(protected, real + "/a")
+        self.assertIsNotNone(server.path_problem(real + "/a/item"))
+
+    def test_trash_step_rechecks_folder_and_file_itself(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "item")
+        open(path, "w").close()
+        real_parent = os.path.realpath(folder)
+        wrong = scanners.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", server.TRASH_SCRIPT, path, real_parent, "1"], timeout=30)
+        self.assertEqual(wrong[1].strip(), "changed")
+        moved_parent = scanners.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", server.TRASH_SCRIPT, path, "/somewhere/else", str(os.lstat(path).st_ino)], timeout=30)
+        self.assertEqual(moved_parent[1].strip(), "changed")
+        self.assertTrue(os.path.exists(path))
+
+    def test_key_change_is_reported(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        for name in ("PLAIN_FILE", "DATA_KEY"):
+            self.addCleanup(setattr, server, name, getattr(server, name))
+        server.PLAIN_FILE = os.path.join(folder, "latest.json")
+        server.write_sealed(server.PLAIN_FILE, {"score": 1}, "report")
+        server.DATA_KEY = b"replaced key"
+        server.state["key_changed"] = False
+        server.remove_unsealed_results()
+        self.assertTrue(server.state["key_changed"])
+        self.assertFalse(os.path.exists(server.PLAIN_FILE))
+
+
+class MissingKey(unittest.TestCase):
+    def test_without_the_key_nothing_is_cleared_or_overwritten(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        for name in ("PLAIN_FILE", "ACTIONS_FILE", "HAS_KEY", "DATA_KEY"):
+            self.addCleanup(setattr, server, name, getattr(server, name))
+        server.PLAIN_FILE = os.path.join(folder, "latest.json")
+        server.ACTIONS_FILE = os.path.join(folder, "actions.jsonl")
+        server.write_sealed(server.PLAIN_FILE, {"score": 1}, "report")
+        server.append_jsonl(server.ACTIONS_FILE, {"t": time.time()})
+        before = [open(p).read() for p in (server.PLAIN_FILE, server.ACTIONS_FILE)]
+        server.HAS_KEY = False
+        server.DATA_KEY = b"throwaway"
+        server.remove_unsealed_results()
+        server.write_sealed(server.PLAIN_FILE, {"score": 2}, "report")
+        server.append_jsonl(server.ACTIONS_FILE, {"t": time.time()})
+        server.prune_jsonl(server.ACTIONS_FILE, 0)
+        self.assertEqual([open(p).read() for p in (server.PLAIN_FILE, server.ACTIONS_FILE)], before)
 
 
 class PackageNames(unittest.TestCase):

@@ -572,7 +572,9 @@ function renderAccess() {
       ${permRow("key", "act", "Admin password", admin ? `Not kept. Last asked ${when(admin)}.` : "Not kept. Only asked for when you approve an action.", "Asked each time", "neutral",
         `<button class="btn sm" id="admin-network">Run network check</button>`)}
       ${permRow("wifi", "good", "Network", "The dashboard only works on this Mac. Homebrew updates go online when you ask.", "Local only", "safe")}
-      ${permRow("lock", "good", "Your data", "Stored results can only be read by your account.", "Private", "safe")}
+      ${d.key_changed ? permRow("lock", "warn", "Your data", "The encryption key changed, so your earlier saved results couldn't be opened and were cleared. If you didn't change anything, another program may have replaced the key.", "Key changed", "medium") : ""}
+      ${d.sealed_storage ? permRow("lock", "good", "Your data", "Saved results that name your files are encrypted. Other programs would need your approval to get the key.", "Encrypted", "safe")
+        : permRow("lock", "warn", "Your data", "Mac Health couldn't get its encryption key, probably because a keychain prompt wasn't allowed. Earlier results are kept as they are, and nothing new is saved until you reopen the app and allow it.", "Not saved", "medium")}
     </div>
     <div class="two" style="margin-bottom:10px">
       <div class="card"><h3>What it can do</h3><ul class="check-list">${can.map(c => `<li style="color:var(--text)"><span style="color:var(--good)">${icon("check")}</span>${esc(c)}</li>`).join("")}</ul></div>
@@ -586,7 +588,7 @@ function renderAccess() {
         <tr><td>Terminal fixes</td><td>What Terminal has</td><td>So you can see each command and only macOS sees your password</td></tr>
       </tbody></table></details>
     <details class="card" style="margin-top:0"><summary>How this stays private</summary>
-      <ul class="steps"><li>Full Disk Access belongs to this app alone, not Terminal.</li><li>It checks its files before running, refuses if they changed, and then runs that checked code from memory.</li><li>A copy not signed by your private key can't use its access, and signing needs your approval.</li><li>Saved results are readable by programs running as you, including file names from protected folders.</li><li>Its secret token stays in memory and is never saved.</li><li>macOS asks for your password directly, so this app never sees it.</li></ul></details>`;
+      <ul class="steps"><li>Full Disk Access belongs to this app alone, not Terminal.</li><li>It checks its files before running, refuses if they changed, and then runs that checked code from memory.</li><li>A copy not signed by your private key can't use its access, and signing needs your approval.</li><li>Saved results that name your files are encrypted, with the key in your keychain, tied to this app.</li><li>Its secret token stays in memory and is never saved.</li><li>macOS asks for your password directly, so this app never sees it.</li></ul></details>`;
 }
 function renderTechnical() {
   const d = view.data;

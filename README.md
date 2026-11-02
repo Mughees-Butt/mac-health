@@ -47,6 +47,8 @@ A stable signature is what lets Full Disk Access survive rebuilds.
 
 macOS asks to use the key. Choose **Allow**, not Always Allow, so nothing can sign silently.
 
+After each rebuild, macOS also asks whether Mac Health may use `Mac Health saved results`, the key that encrypts its saved data, because it's a new build. Allow it for Mac Health. If you don't, earlier results are kept as they are and nothing new is saved until you allow it. Deny any other program asking for that item.
+
 **3. Open it and grant access.** Open `Mac Health.app`, then add it under System Settings > Privacy & Security > Full Disk Access and reopen it. The app works without this, but can't see protected folders.
 
 **4. Optional: add the terminal command.** Make sure `~/.local/bin` is on your `PATH`.
@@ -95,7 +97,7 @@ To run the interface from source, without Full Disk Access, see the comments at 
 - The app checks its code against built-in hashes, then passes those exact bytes to Python in memory.
 - A one-time token travels the same way and is never written to disk.
 - The server listens only on `127.0.0.1`, on a random port, and checks the token, Host and Origin.
-- Your data stays in `~/.mac-health`. Homebrew fixes go online when you ask.
+- Your data stays in `~/.mac-health`. Results and logs that name your files are encrypted, with the key in your keychain, tied to the signed app. Scores and disk trends in `history.jsonl` aren't encrypted. Homebrew fixes go online when you ask.
 
 ### What has which access
 
@@ -109,7 +111,7 @@ To run the interface from source, without Full Disk Access, see the comments at 
 ### Limits
 
 - **It can't prove a Mac is free of malware.** A clean result means nothing looked wrong, not that nothing is wrong.
-- **Other programs running as you can see what you can.** macOS doesn't separate programs in one account, except for protected folders. That includes saved results in `~/.mac-health`, which can contain file names from protected folders.
+- **Other programs running as you can see what you can.** macOS doesn't separate programs in one account, except for protected folders. Saved results that name your files are encrypted, but while a scan runs, a program could still see file paths in the process list.
 - **Someone could try to trick you into approving a prompt.** Read what's listed, and cancel anything you didn't start.
 - **A program running as you could change this source before you build it.** The build uses a clean environment, but can't prevent that.
 
@@ -117,4 +119,4 @@ Tested: injecting a library into the signed app was blocked, and attaching to it
 
 ## Uninstall
 
-Delete `Mac Health.app` and `~/.mac-health`, remove the `machealth` link, and delete the `Mac Health Local Signing` key in Keychain Access.
+Delete `Mac Health.app` and `~/.mac-health`, remove the `machealth` link, and delete the `Mac Health Local Signing` key and the `Mac Health saved results` item in Keychain Access.

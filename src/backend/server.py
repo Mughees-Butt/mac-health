@@ -8,6 +8,9 @@ To run from source for testing, with no special access, hold a pipe open and sen
     (openssl rand -hex 32; sleep 600) | HOME=/tmp/some-folder /usr/bin/python3 -I -B src/backend/server.py
 It prints "PORT n". Open http://127.0.0.1:n/#<token> in a browser. Without the temporary HOME, scans overwrite real results.
 """
+import base64
+import hashlib
+import hmac
 import json
 import os
 import shlex
@@ -49,6 +52,12 @@ SCAN_VALID_SECONDS = 3600  # changes need a recent scan, because an app can be r
 
 TOKEN = None
 PORT = None
+# Held in the app's keychain item and passed in memory. Without it, nothing saved survives a restart.
+DATA_KEY = PAYLOAD["data_key"].encode() if PAYLOAD and PAYLOAD.get("data_key") else secrets.token_bytes(32)
+SEALED_MARK = "MHS1:"
+# Without the app's key (for example a keychain prompt that went unanswered), saved files are left exactly as they
+# are and nothing new is saved. Running from source uses a throwaway key instead.
+HAS_KEY = bool(PAYLOAD.get("data_key")) if PAYLOAD else True
 INDEX_HTML = b""
 HOME = scanners.HOME
 # Folders that must never be moved to Trash as a whole, even if a scan result names them.
@@ -68,10 +77,15 @@ SETTINGS_PANES = {
     "battery": "x-apple.systempreferences:com.apple.Battery-Settings.extension",
 }
 
+# Checks again, inside the same process that moves it, that this is the exact file and folder that were approved.
+# A folder swapped for a link in the meantime would otherwise send something else to Trash.
 TRASH_SCRIPT = """
 function run(argv) {
   ObjC.import('Foundation');
   const url = $.NSURL.fileURLWithPath(argv[0]);
+  const parent = url.URLByDeletingLastPathComponent.URLByResolvingSymlinksInPath.path.js;
+  const attributes = $.NSFileManager.defaultManager.attributesOfItemAtPathError(argv[0], null);
+  if (parent !== argv[1] || attributes.isNil() || String(ObjC.unwrap(attributes.objectForKey('NSFileSystemFileNumber'))) !== argv[2]) return 'changed';
   const error = Ref();
   const ok = $.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError(url, null, error);
   return ok ? 'ok' : 'blocked';  // reading the error object can crash osascript
@@ -86,7 +100,7 @@ end run
 
 state_lock = threading.Lock()
 state = {"scanning": False, "stage": None, "percent": 0, "error": None, "report": None, "tech": {}, "system_tech": None,
-         "acting": False, "tech_expires": None, "actionable": {}, "revealable": {}, "system_items": {}, "admin_network": None, "brew_ids": set(), "reinstall": {}, "scanned_at": None,
+         "acting": False, "tech_expires": None, "actionable": {}, "revealable": {}, "system_items": {}, "admin_network": None, "brew_ids": set(), "reinstall": {}, "scanned_at": None, "key_changed": False,
          "job": {"name": None, "running": False, "log": "", "ok": None, "summary": None}}
 
 
@@ -126,6 +140,69 @@ def finite_float(text):
     return value
 
 
+def sealing_keys():
+    derive = lambda purpose: hashlib.blake2b(DATA_KEY, digest_size=32, person=purpose).digest()
+    return derive(b"mac-health-enc"), derive(b"mac-health-mac")
+
+
+def keystream_xor(key, nonce, data):
+    # The standard library has no AES, so this is keyed BLAKE2b in counter mode, then a separate keyed tag.
+    output = bytearray(len(data))
+    for block in range(0, len(data), 64):
+        stream = hashlib.blake2b(nonce + (block // 64).to_bytes(8, "big"), key=key, digest_size=64).digest()
+        chunk = data[block:block + 64]
+        output[block:block + len(chunk)] = bytes(a ^ b for a, b in zip(chunk, stream))
+    return bytes(output)
+
+
+def seal(text, context):
+    """Encrypts results that name your files, so other programs running as you can't read them. context ties it to its use."""
+    enc_key, mac_key = sealing_keys()
+    nonce = secrets.token_bytes(16)
+    body = keystream_xor(enc_key, nonce, text.encode("utf-8"))
+    tag = hashlib.blake2b(context.encode() + nonce + body, key=mac_key, digest_size=32).digest()
+    return SEALED_MARK + base64.b64encode(nonce + tag + body).decode("ascii")
+
+
+def unseal(text, context):
+    """Returns the text, or None if it was changed, sealed with another key, or isn't sealed at all."""
+    if not text.startswith(SEALED_MARK):
+        return None
+    try:
+        raw = base64.b64decode(text[len(SEALED_MARK):], validate=True)
+        nonce, tag, body = raw[:16], raw[16:48], raw[48:]
+        enc_key, mac_key = sealing_keys()
+        expected = hashlib.blake2b(context.encode() + nonce + body, key=mac_key, digest_size=32).digest()
+        return keystream_xor(enc_key, nonce, body).decode("utf-8") if hmac.compare_digest(tag, expected) else None
+    except ValueError:
+        return None
+
+
+def write_sealed(path, value, context):
+    if HAS_KEY:
+        write_private(path, seal(to_json(value), context))
+
+
+def read_sealed(path, fallback, context):
+    try:
+        with open_private(path) as handle:
+            text = unseal(handle.read().strip(), context)
+        if text is None:
+            return fallback
+        value = json.loads(text, parse_constant=reject_constant, parse_float=finite_float)
+    except (OSError, ValueError, RecursionError):
+        return fallback
+    return value if fallback is None or isinstance(value, type(fallback)) else fallback
+
+
+def encode_row(path, row):
+    return seal(to_json(row), "actions") if path == ACTIONS_FILE else to_json(row)
+
+
+def may_write(path):
+    return HAS_KEY or path != ACTIONS_FILE
+
+
 def to_json(value):
     return json.dumps(value, default=str)  # plist values can be dates or data
 
@@ -135,6 +212,9 @@ def read_jsonl(path):
     try:
         with open_private(path) as handle:
             for line in handle:
+                line = line.strip()
+                if path == ACTIONS_FILE and line.startswith(SEALED_MARK):
+                    line = unseal(line, "actions") or ""
                 try:
                     row = json.loads(line, parse_constant=reject_constant, parse_float=finite_float)
                 except (ValueError, RecursionError):
@@ -147,6 +227,8 @@ def read_jsonl(path):
 
 
 def append_jsonl(path, row):
+    if not may_write(path):
+        return
     with storage_lock:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         info = os.fstat(fd)
@@ -154,7 +236,7 @@ def append_jsonl(path, row):
             os.close(fd)
             raise OSError("Not a regular, unshared file")
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
-            handle.write(to_json(row) + "\n")
+            handle.write(encode_row(path, row) + "\n")
 
 
 def prune_jsonl(path, retention_days):
@@ -162,8 +244,15 @@ def prune_jsonl(path, retention_days):
     with storage_lock:
         rows = read_jsonl(path)
         kept = [r for r in rows if r.get("t", 0) >= cutoff]
-        if len(kept) != len(rows):
-            write_private(path, "".join(to_json(r) + "\n" for r in kept))
+        unsealed = False
+        if path == ACTIONS_FILE:
+            try:
+                with open_private(path) as handle:
+                    unsealed = any(line.strip() and not line.startswith(SEALED_MARK) for line in handle)
+            except (OSError, ValueError):
+                pass
+        if (len(kept) != len(rows) or unsealed) and may_write(path):
+            write_private(path, "".join(encode_row(path, r) + "\n" for r in kept))
 
 
 def read_json(path, fallback):
@@ -191,7 +280,7 @@ def purge_expired():
     except OSError:
         pass
     for path in technical_files():
-        expires = read_json(path, {}).get("expires_at", 0)
+        expires = read_sealed(path, {}, "technical").get("expires_at", 0)
         if not isinstance(expires, (int, float)) or expires <= now:
             try:
                 os.remove(path)
@@ -252,18 +341,36 @@ def valid_report(report):
 
 def load_saved():
     """Restore the last results after a restart. Actions stay off until a fresh scan."""
-    saved_report = read_json(PLAIN_FILE, None)
+    saved_report = read_sealed(PLAIN_FILE, None, "report")
     state["report"] = saved_report if valid_report(saved_report) else None
     if not state["report"]:
         return
     files = technical_files()
     if files:
-        saved = read_json(files[-1], {})
+        saved = read_sealed(files[-1], {}, "technical")
         expires = saved.get("expires_at", 0)
         if isinstance(expires, (int, float)) and expires > time.time() and isinstance(saved.get("items"), dict):
             state["tech"] = saved["items"]
             state["system_tech"] = saved.get("system")
             state["tech_expires"] = expires
+
+
+def remove_unsealed_results():
+    """Results from before encryption, or from another key. A new scan replaces them."""
+    if not HAS_KEY:
+        return
+    for path, context in ((PLAIN_FILE, "report"),):
+        if os.path.lexists(path) and read_sealed(path, None, context) is None:
+            try:
+                with open_private(path) as handle:
+                    # Sealed results the current key can't open mean the key changed, which you should hear about.
+                    state["key_changed"] = handle.read(len(SEALED_MARK)) == SEALED_MARK
+            except (OSError, ValueError):
+                pass
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def secure_subfolders():
@@ -302,7 +409,7 @@ def recalculate(report):
     report["score"], report["deductions"] = scanners.build_score(report["cards"], report["sections"])
     report["tips"] = scanners.build_tips(report["cards"], report["sections"])
     stamp_first_seen(report["tips"])
-    write_private(PLAIN_FILE, to_json(report))
+    write_sealed(PLAIN_FILE, report, "report")
 
 
 def stamp_first_seen(tips):
@@ -372,14 +479,14 @@ def do_scan():
 
         secure_subfolders()
         delete_all_technical()
-        write_private(os.path.join(TECH_DIR, "%d.json" % report["generated_at"]),
-                      to_json({"expires_at": expires, "items": tech, "system": system}))
-        write_private(PLAIN_FILE, to_json(report))
+        write_sealed(os.path.join(TECH_DIR, "%d.json" % report["generated_at"]),
+                     {"expires_at": expires, "items": tech, "system": system}, "technical")
+        write_sealed(PLAIN_FILE, report, "report")
 
         sizes = lambda name: sum(i["size"] or 0 for i in report["sections"][name])
         append_jsonl(HISTORY_FILE, {
             "t": report["generated_at"], "score": report["score"], "disk_used": report["cards"]["disk"]["used"],
-            "disk_total": report["cards"]["disk"]["total"],
+            "disk_total": report["cards"]["disk"]["total"], "full_disk_access": report["access"]["full_disk_access"], "unfinished_checks": len(report["coverage"]),
             "alerts": len(report["sections"]["alerts"]), "leftovers_size": sizes("leftovers"),
             "clutter_size": sizes("clutter"), "developer_size": sizes("developer"),
         })
@@ -414,6 +521,8 @@ def path_problem(path):
     if clean != path or not os.path.isabs(path) or path.startswith("//"):
         return "The path isn't valid."
     parent = os.path.realpath(os.path.dirname(path))
+    if parent != os.path.dirname(path):
+        return "Its folder is now a link, so it wasn't moved."  # links are how a protected folder could be swapped in
     target = os.path.join(parent, os.path.basename(path))
     for candidate in (folded(path), folded(target)):
         if candidate in PROTECTED_FOLDED or any(candidate == n or candidate.startswith(n + "/") for n in NEVER_MOVED) or ".photoslibrary" in candidate:
@@ -426,9 +535,14 @@ def path_problem(path):
 
 
 def move_to_trash(path):
-    if not os.path.lexists(path):
+    try:
+        info = os.lstat(path)
+    except OSError:
         return "It's already gone."
-    code, out = scanners.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", TRASH_SCRIPT, path], timeout=120)
+    parent = os.path.realpath(os.path.dirname(path))
+    code, out = scanners.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", TRASH_SCRIPT, path, parent, str(info.st_ino)], timeout=120)
+    if out.strip() == "changed":
+        return "It changed after the scan, so it wasn't moved"
     if code == 0 and out.strip() == "ok" and not os.path.lexists(path):
         return None
     return "macOS blocked this move"
@@ -469,7 +583,7 @@ TOO_OLD = {"error": "This scan is over an hour old. Scan again, then retry."}, 4
 def already_moved_copy(entry, path):
     """A rescan can't see copies in Trash, so remember them. Only a large file can lose its duplicate label this way."""
     size = str(entry.get("size"))
-    known = read_json(MOVED_COPIES_FILE, {}).get(size)
+    known = read_sealed(MOVED_COPIES_FILE, {}, "copies").get(size)
     if entry["category"] != "large" or not isinstance(known, list):
         return False
     try:
@@ -480,11 +594,11 @@ def already_moved_copy(entry, path):
 
 def remember_moved_copy(entry, digest):
     with storage_lock:
-        known = read_json(MOVED_COPIES_FILE, {})
+        known = read_sealed(MOVED_COPIES_FILE, {}, "copies")
         known.setdefault(str(entry["size"]), [])
         if isinstance(known[str(entry["size"])], list):
             known[str(entry["size"])].append(digest)
-        write_private(MOVED_COPIES_FILE, to_json(known))
+        write_sealed(MOVED_COPIES_FILE, known, "copies")
 
 
 def trash_items(ids, personal_ok=False):
@@ -599,8 +713,10 @@ def remove_system_item(item_id):
                 steps.append("/bin/launchctl bootout gui/%d/%s 2>/dev/null" % (uid, label))
             steps.append('/bin/mv -n %s "$HOLD"/' % shlex.quote(entry["path"]))
         # A hard link inside could be another root file, so linked files are never handed over.
-        # Depth first, so the folder that keeps other programs out is handed over last.
-        steps.append('/usr/bin/find -d "$HOLD" \\( -type d -o -links 1 \\) -exec /usr/sbin/chown -h %d {} +' % uid)
+        # Only each moved item itself is handed over, never what's inside it. Every path here starts with the
+        # root-only holding folder, which no other program can change, and that folder is handed over last.
+        steps.append('/usr/bin/find "$HOLD" -mindepth 1 -maxdepth 1 \\( -type d -o -links 1 \\) -exec /usr/sbin/chown -h %d {} +' % uid)
+        steps.append('/usr/sbin/chown %d "$HOLD"' % uid)
         steps.append('echo "$HOLD"')
         ok, output = run_admin("; ".join(steps))
         if not ok:
@@ -908,7 +1024,8 @@ class Handler(BaseHTTPRequestHandler):
                         "revealable": list(state["revealable"].keys()),
                         "system_items": list(state["system_items"].keys()), "brew_ready": list(state["brew_ids"]), "reinstall_ready": list(state["reinstall"].keys()),
                         "admin_network": state["admin_network"], "app_path": os.environ.get("MAC_HEALTH_APP"),
-                        "full_disk_access": access, "admin_last_used": admin_used}
+                        "full_disk_access": access, "admin_last_used": admin_used,
+                        "sealed_storage": bool(PAYLOAD and PAYLOAD.get("data_key")), "key_changed": state["key_changed"]}
                 body = to_json(data).encode("utf-8")
             return self.send_body(200, body)
         if path == "/api/history":
@@ -1002,10 +1119,10 @@ class Handler(BaseHTTPRequestHandler):
                 report = state["report"]
                 if state["tech_expires"] and report:
                     state["tech_expires"] = report["generated_at"] + days * DAY
-                    payload = json.dumps({"expires_at": state["tech_expires"], "items": state["tech"], "system": state["system_tech"]})
+                    payload = {"expires_at": state["tech_expires"], "items": state["tech"], "system": state["system_tech"]}
                     stamp = int(report["generated_at"])
             if payload:
-                write_private(os.path.join(TECH_DIR, "%d.json" % stamp), payload)
+                write_sealed(os.path.join(TECH_DIR, "%d.json" % stamp), payload, "technical")
                 purge_expired()
             return self.send_json({"ok": True})
         if self.path == "/api/technical/delete":
@@ -1049,6 +1166,7 @@ def main():
         pass
     try:
         scanners.clear_leftover_jobs()
+        remove_unsealed_results()
         purge_expired()
         load_saved()
     except Exception:  # damaged saved data must never stop the app from opening

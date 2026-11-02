@@ -234,6 +234,11 @@ def full_hash(path):
     return hasher.hexdigest()
 
 
+def real_folder(path):
+    """A link here could make your own files look like cache or leftovers."""
+    return not os.path.islink(path) and os.path.realpath(path) == path
+
+
 def pretty_path(path):
     return path.replace(HOME, "~", 1) if path.startswith(HOME) else path
 
@@ -404,18 +409,18 @@ def signature_info(path):
 
 def gatekeeper_verdict(path):
     """accepted is True or False on a clear verdict. reason explains a damaged bundle."""
-    out = ""
-    for timeout in (45,):
-        _, out = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "exec", path], timeout=timeout)
-        source = re.search(r"source=(.+)", out)
-        if re.search(r": accepted\b", out):
-            return {"accepted": True, "source": source.group(1).strip() if source else None}
-        if re.search(r": rejected\b", out):
-            return {"accepted": False, "source": source.group(1).strip() if source else None}
-        first = out.strip().splitlines()[0] if out.strip() else ""
-        if ": " in first:
-            return {"accepted": None, "source": None, "reason": first.split(": ", 1)[1]}
-    return {"accepted": None, "source": None, "reason": None}
+    # Read the verdict only from where spctl puts it, right after the path, so a name containing
+    # ": accepted" can't stand in for it. The exit code must agree.
+    code, out = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "exec", path], timeout=45)
+    lines = out.strip().splitlines()
+    first = lines[0] if lines else ""
+    verdict = first[len(path) + 2:].strip() if first.startswith(path + ": ") else ""
+    source = next((line[len("source="):].strip() for line in lines[1:] if line.startswith("source=")), None)
+    if verdict == "accepted" and code == 0:
+        return {"accepted": True, "source": source}
+    if verdict == "rejected" and code != 0:
+        return {"accepted": False, "source": source}
+    return {"accepted": None, "source": None, "reason": verdict or None}
 
 
 def last_used_days(path):
@@ -849,6 +854,9 @@ def scan_leftovers(apps, coverage):
     groups = {}
     for location in locations:
         root = os.path.join(LIB, location)
+        if os.path.lexists(root) and not real_folder(root):
+            coverage.append({"area": "~/Library/%s" % location, "status": "partial", "note": "It's a link to somewhere else, so it was skipped. Check that you set this up."})
+            continue
         try:
             names = os.listdir(root)
         except OSError:
@@ -926,6 +934,9 @@ def scan_clutter(coverage):
     results = []
 
     def sized_children(root, minimum, make):
+        if not real_folder(root):
+            coverage.append({"area": pretty_path(root), "status": "partial", "note": "It's a link to somewhere else, so it was skipped. Check that you set this up."})
+            return
         try:
             names = os.listdir(root)
         except OSError:
@@ -950,6 +961,8 @@ def scan_clutter(coverage):
 
     downloads = os.path.join(HOME, "Downloads")
     try:
+        if not real_folder(downloads):
+            raise OSError("link")
         for name in os.listdir(downloads):
             path = os.path.join(downloads, name)
             age = age_days(path)
