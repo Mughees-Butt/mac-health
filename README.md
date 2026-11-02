@@ -1,8 +1,35 @@
 # Mac Health
 
-A private health dashboard for your own Mac. It explains what's going on in plain language, separates what needs you from what doesn't, and offers a safe fix where one exists. Results stay on your Mac.
+A private health dashboard for your own Mac. It explains what's going on in plain language, separates what needs you from what doesn't, and offers a safe fix where one exists. Everything stays on your Mac.
 
-**Status: pre-release.** Developed and tested on one Apple silicon Mac.
+**Status: pre-release (0.9.0).** Tested on Apple silicon with macOS 27.
+
+## Quick start
+
+```bash
+git clone https://github.com/Mughees-Butt/mac-health.git
+cd mac-health
+./install.sh
+```
+
+The installer checks your Mac, creates a private signing key, builds the app, and adds the `machealth` command. It then opens the Full Disk Access settings for the last step. It's safe to run again, and `./install.sh --check` only reports what's missing.
+
+**You need** macOS 13 or later and the Xcode Command Line Tools (`xcode-select --install`). Xcode alone isn't enough, because the app only runs the root-owned Python those tools install. [Homebrew](https://brew.sh) is optional, for package checks and fixes. Nothing else is downloaded.
+
+**Two macOS prompts appear during setup:**
+- **Using the signing key:** choose **Allow**, not Always Allow, so nothing can sign silently. This appears on every build.
+- **Mac Health keeping its encryption key:** allow it for Mac Health. Deny any other program asking for `Mac Health saved results`.
+
+**Last step:** add Mac Health under System Settings > Privacy & Security > Full Disk Access. It works without this, but can't see protected folders.
+
+## Use
+
+```bash
+machealth            # open and scan
+machealth --no-scan  # open your saved results
+```
+
+Or open `Mac Health.app` from the folder.
 
 ## What it checks
 
@@ -21,102 +48,58 @@ A private health dashboard for your own Mac. It explains what's going on in plai
 
 Removals go to Trash. Admin actions use macOS's own password prompt, and Homebrew fixes run visibly in Terminal.
 
-## Requirements
+## Privacy and security
 
-- macOS 13 or later
-- Xcode Command Line Tools, for `swiftc` and Python: `xcode-select --install`. Xcode alone isn't enough, because the app only runs the root-owned Python these tools install.
-- Optional: [Homebrew](https://brew.sh), for package checks and fixes
+- Full Disk Access belongs to the signed app, never Terminal. Always open it through `open` or `machealth`.
+- The app checks its code against hashes built into it, then runs those exact bytes in memory.
+- The dashboard's server listens only on `127.0.0.1` and checks a one-time token that's never written to disk.
+- Your data stays in `~/.mac-health`. Results and logs that name your files are encrypted, with the key in your keychain. Scores and disk trends aren't.
 
-The app needs no third-party packages.
+| Part | Has | Why |
+|---|---|---|
+| Mac Health | Full Disk Access | To read protected folders during a scan |
+| Homebrew and Docker checks | No Full Disk Access | Your account can change them, so they run as a separate job, and only after the app proves that job lacks access |
+| Removing system files | Admin, once | macOS asks each time, and the app lists the files first |
+| Terminal fixes | What Terminal has | So you can see each command, and only macOS sees your password |
 
-## Install
+**Limits**
+- **It can't prove a Mac is free of malware.** A clean result means nothing looked wrong, not that nothing is wrong.
+- **Other programs running as you can see what you can.** macOS doesn't separate programs in one account, except for protected folders. While a scan runs, they could see file paths in the process list.
+- **Someone could try to trick you into approving a prompt.** Read what's listed, and cancel anything you didn't start.
+- **A program running as you could change this source before you build it,** or replace the encryption key item with one trusting only Mac Health.
 
-**1. Create your private signing key.** This runs once and adds a key to your login keychain.
+To report a security problem, see [SECURITY.md](SECURITY.md).
 
-```bash
-./scripts/setup-signing.sh
-```
-
-A stable signature is what lets Full Disk Access survive rebuilds.
-
-**2. Build the app.**
-
-```bash
-./build.sh
-```
-
-macOS asks to use the key. Choose **Allow**, not Always Allow, so nothing can sign silently.
-
-After each rebuild, macOS also asks whether Mac Health may use `Mac Health saved results`, the key that encrypts its saved data, because it's a new build. Allow it for Mac Health. If you don't, earlier results are kept as they are and nothing new is saved until you allow it. Deny any other program asking for that item.
-
-**3. Open it and grant access.** Open `Mac Health.app`, then add it under System Settings > Privacy & Security > Full Disk Access and reopen it. The app works without this, but can't see protected folders.
-
-**4. Optional: add the terminal command.** Make sure `~/.local/bin` is on your `PATH`.
-
-```bash
-mkdir -p ~/.local/bin && ln -s "$PWD/bin/machealth" ~/.local/bin/machealth
-```
-
-## Use
-
-```bash
-machealth
-```
-
-This opens the app and starts a scan, with results in its window. `machealth --no-scan` opens your saved results.
-
-After changing anything in `src/`, quit the app and rebuild. It refuses to run files that don't match the hashes built into it.
-
-## Project layout
+## Development
 
 ```text
-bin/machealth             Terminal command
-build.sh                  Builds, hashes and signs the app
-scripts/setup-signing.sh  Creates the local signing key
-src/app/                  Swift app window and Info.plist
-src/backend/              Python checks, local server and actions
-src/ui/index.html         The whole interface in one file
-tests/                    Automated checks
+install.sh                  One-step setup
+build.sh                    Builds, hashes and signs the app
+bin/machealth               Terminal command
+scripts/setup-signing.sh    Creates the local signing key
+scripts/uninstall.sh        Removes Mac Health, asking at each step
+src/app/                    Swift app window and Info.plist
+src/backend/                Python checks, local server and actions
+src/ui/index.html           The whole interface, in one file
+tests/                      Automated checks
 ```
 
-Python must stay 3.9 compatible with no third-party packages, because the app runs the Command Line Tools' Python.
-
-## Tests
+After changing anything in `src/`, quit the app and run `./build.sh`. The app refuses to run files that don't match its built-in hashes. Python must stay 3.9 compatible, with no third-party packages.
 
 ```bash
 for t in tests/test_*.py; do /usr/bin/python3 -B "$t" || break; done
 ```
 
-The tests use a temporary home folder and a fake `brew`, so they don't touch your results or change your Mac.
-
-To run the interface from source, without Full Disk Access, see the comments at the top of `src/backend/server.py`.
-
-## Privacy and security
-
-- Full Disk Access belongs to the signed app, never Terminal. Always open it through `open` or `machealth`.
-- The app checks its code against built-in hashes, then passes those exact bytes to Python in memory.
-- A one-time token travels the same way and is never written to disk.
-- The server listens only on `127.0.0.1`, on a random port, and checks the token, Host and Origin.
-- Your data stays in `~/.mac-health`. Results and logs that name your files are encrypted, with the key in your keychain, tied to the signed app. Scores and disk trends in `history.jsonl` aren't encrypted. Homebrew fixes go online when you ask.
-
-### What has which access
-
-| Part | Has | Why |
-|---|---|---|
-| Mac Health | Full Disk Access | To read protected folders during a scan |
-| Homebrew and Docker checks | No Full Disk Access | Your account can change them, so they run as a separate job. If the app can't prove that job lacks access, they don't run. |
-| Removing system files | Admin, once | macOS asks each time, and the app lists the files first |
-| Terminal fixes | What Terminal has | So you can see each command and only macOS sees your password |
-
-### Limits
-
-- **It can't prove a Mac is free of malware.** A clean result means nothing looked wrong, not that nothing is wrong.
-- **Other programs running as you can see what you can.** macOS doesn't separate programs in one account, except for protected folders. Saved results that name your files are encrypted, but while a scan runs, a program could still see file paths in the process list.
-- **Someone could try to trick you into approving a prompt.** Read what's listed, and cancel anything you didn't start.
-- **A program running as you could change this source before you build it.** The build uses a clean environment, but can't prevent that.
-
-Tested: injecting a library into the signed app was blocked, and attaching to it or its Python process was refused from a normal program.
+The tests use a temporary home folder and a fake `brew`, so they don't touch your results. To run the interface from source without Full Disk Access, see the comment at the top of `src/backend/server.py`.
 
 ## Uninstall
 
-Delete `Mac Health.app` and `~/.mac-health`, remove the `machealth` link, and delete the `Mac Health Local Signing` key and the `Mac Health saved results` item in Keychain Access.
+```bash
+./scripts/uninstall.sh
+```
+
+Then remove Mac Health from System Settings > Privacy & Security > Full Disk Access.
+
+## License
+
+[MIT](LICENSE)
