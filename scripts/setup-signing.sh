@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # Creates the private "Mac Health Local Signing" key that build.sh signs with. Run once per Mac.
 # A stable signature is what lets Full Disk Access survive rebuilds.
 # The key isn't opened to any program, so macOS asks before each signing. Choose Allow, not Always Allow.
@@ -35,6 +35,7 @@ EOF
 PASSWORD="$(/usr/bin/openssl rand -hex 32)"
 /usr/bin/openssl pkcs12 -export -inkey "$WORK/key.pem" -in "$WORK/cert.pem" -name "$NAME" \
   -out "$WORK/identity.p12" -passout "pass:$PASSWORD"
-/usr/bin/security import "$WORK/identity.p12" -k "$KEYCHAIN" -f pkcs12 -P "$PASSWORD" >/dev/null
+# -x means the private key can't be exported from the keychain afterwards.
+/usr/bin/security import "$WORK/identity.p12" -k "$KEYCHAIN" -f pkcs12 -P "$PASSWORD" -x >/dev/null
 
 echo "Created the $NAME key. Next, run ./build.sh"

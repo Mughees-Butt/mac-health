@@ -335,7 +335,7 @@ function renderTabs() {
   const s = sections();
   const kind = { alerts: s && s.alerts.some(i => i.severity === "high") ? "bad" : "warn", leftovers: "warn", tips: "warn" };
   document.getElementById("tabs").innerHTML = TABS.map(([id, label, ic]) =>
-    `<button class="tab" role="tab" id="tab-${id}" data-tab="${id}" aria-controls="main" tabindex="${view.tab === id ? 0 : -1}" aria-selected="${view.tab === id}">${icon(ic)}${esc(label)}${counts[id] ? `<span class="count ${kind[id] || ""}">${counts[id]}</span>` : ""}</button>`
+    `<button class="tab" role="tab" id="tab-${id}" data-tab="${id}" aria-controls="main" tabindex="${view.tab === id ? 0 : -1}" aria-selected="${view.tab === id}">${icon(ic)}${esc(label)}${counts[id] ? `<span class="count ${kind[id] || ""}">${esc(counts[id])}</span>` : ""}</button>`
   ).join("");
   main.setAttribute("aria-labelledby", "tab-" + view.tab);
   // Keeps the current page in view when the tabs scroll sideways in a narrow window.
@@ -399,7 +399,8 @@ function checkGaps(tab) {
   return report.coverage.filter(c => {
     if (c.area === "Protected app data") return false;  // this limits removing, not checking
     if (tab === "overview") return c.fix !== "fda";  // those have their own button
-    return (GAP_TABS[c.area] || (c.area.startsWith("~/Library/") ? ["leftovers"] : [])).includes(tab);
+    const tabs = Object.prototype.hasOwnProperty.call(GAP_TABS, c.area) ? GAP_TABS[c.area] : c.area.startsWith("~/Library/") ? ["leftovers"] : [];
+    return tabs.includes(tab);
   });
 }
 function gapNotice() {
@@ -423,6 +424,7 @@ function selectSafe(items) {
   const safe = items.filter(i => i.confidence === "safe" && i.trashable && view.data.actionable.includes(i.id));
   return safe.length ? `<button class="btn sm" data-select-many="${esc(safe.map(i => i.id).join(","))}">${icon("check")}Select ${safe.length} safe</button>` : "";
 }
+function s_duplicates() { const s = sections(); return s ? s.duplicates : []; }
 function total(items) { const t = items.reduce((sum, i) => sum + (i.size || 0), 0); return t ? size(t) : ""; }
 // After finishing a page, point to the next one that still has something to do.
 function nudge() {
@@ -433,7 +435,7 @@ function nudge() {
   const next = order.slice(start + 1).find(t => counts[t]);
   const labels = Object.fromEntries(TABS.map(t => [t[0], t]));
   if (!next) return `<div class="nudge"><span class="badge good">${icon("check")}</span><strong>That's everything for this scan.</strong><span class="spacer"></span><button class="btn sm" data-tab="overview">Back to Overview</button></div>`;
-  return `<div class="nudge">${counts[view.tab] ? "<span>Done here?</span>" : "<span>All done here.</span>"}<strong>Next: ${esc(labels[next][1])} (${counts[next]})</strong><span class="spacer"></span><button class="btn primary sm" data-tab="${next}">Continue ${icon("arrow")}</button></div>`;
+  return `<div class="nudge">${counts[view.tab] ? "<span>Done here?</span>" : "<span>All done here.</span>"}<strong>Next: ${esc(labels[next][1])} (${esc(counts[next])})</strong><span class="spacer"></span><button class="btn primary sm" data-tab="${next}">Continue ${icon("arrow")}</button></div>`;
 }
 function restoredNotice() {
   return view.data.actionable.length || view.data.system_items.length || view.data.brew_ready.length || view.data.reinstall_ready.length || !view.data.report ? "" :
@@ -576,8 +578,15 @@ function renderAccess() {
       <div class="card"><h3>What it can do</h3><ul class="check-list">${can.map(c => `<li style="color:var(--text)"><span style="color:var(--good)">${icon("check")}</span>${esc(c)}</li>`).join("")}</ul></div>
       <div class="card"><h3>What it can't do</h3><ul class="check-list">${cannot.map(c => `<li><span style="color:var(--text-3)">${icon("x")}</span>${esc(c)}</li>`).join("")}</ul></div>
     </div>
+    <details class="card" style="margin-bottom:10px;margin-top:0"><summary>What each kind of access is for</summary>
+      <table class="table" style="margin-top:8px"><thead><tr><th>Part</th><th>Has</th><th>Why</th></tr></thead><tbody>
+        <tr><td>Mac Health</td><td>Full Disk Access</td><td>To read protected folders during a scan</td></tr>
+        <tr><td>Homebrew and Docker checks</td><td>No Full Disk Access</td><td>Your account can change them, so they run as a separate job. If that can't be proven, they don't run.</td></tr>
+        <tr><td>Removing system files</td><td>Admin, once</td><td>macOS asks each time and the dialog lists the files</td></tr>
+        <tr><td>Terminal fixes</td><td>What Terminal has</td><td>So you can see each command and only macOS sees your password</td></tr>
+      </tbody></table></details>
     <details class="card" style="margin-top:0"><summary>How this stays private</summary>
-      <ul class="steps"><li>Full Disk Access belongs to this app alone, not Terminal.</li><li>It checks its files before running, refuses if they changed, and then runs that checked code from memory.</li><li>A copy not signed by your private key can't use its access, and signing needs your approval.</li><li>Its secret token stays in memory and is never saved.</li><li>macOS asks for your password directly, so this app never sees it.</li></ul></details>`;
+      <ul class="steps"><li>Full Disk Access belongs to this app alone, not Terminal.</li><li>It checks its files before running, refuses if they changed, and then runs that checked code from memory.</li><li>A copy not signed by your private key can't use its access, and signing needs your approval.</li><li>Saved results are readable by programs running as you, including file names from protected folders.</li><li>Its secret token stays in memory and is never saved.</li><li>macOS asks for your password directly, so this app never sees it.</li></ul></details>`;
 }
 function renderTechnical() {
   const d = view.data;
@@ -678,7 +687,12 @@ function renderPage() {
     developer: renderDeveloper,
     files: renderFiles, startup: renderStartup, network: renderNetwork, tips: renderTips, history: renderHistory, access: renderAccess, technical: renderTechnical,
   };
+  try {
   main.innerHTML = (report ? restoredNotice() + gapNotice() : "") + (view.message ? `<div class="notice ${view.message.kind}">${esc(view.message.text)}</div>` : "") + views[view.tab]() + (report ? nudge() : "");
+  } catch (error) {
+    // Saved results can be damaged. There must always be a way forward.
+    main.innerHTML = `<div class="card empty"><h2>These saved results can't be shown</h2><p>A new scan replaces them.</p><button class="btn primary" id="first-scan">Scan now</button></div>`;
+  }
   view.message = null;
   if (view.tab === "history") bindCharts();
   renderTray();
@@ -712,7 +726,9 @@ async function runFix(fix, itemId, title) {
       result.ok ? showSuccess("The firewall is on.") : showError("macOS didn't confirm the change.");
     });
   } else if (fix.kind === "admin_remove") {
-    askConfirm(`${fix.label}?`, "macOS will ask for your password. The files go to Trash, and reinstalling the app recreates what it needs.", [title], "Continue", false, async () => {
+    const tech = view.data.technical[itemId] || {};
+    const files = [...(tech.system_items || []), ...(tech.user_items || [])].map(e => e.path);
+    askConfirm(`${fix.label}?`, "macOS will ask for your password to move exactly these files to Trash. Reinstalling the app recreates what it needs.", files.length ? files : [title], "Continue", false, async () => {
       const result = await api("/api/remove-system", { id: itemId });
       await refresh();
       showSuccess(`Removed: ${title}. ${result.note || "Some changes finish after a restart."}`);
@@ -846,10 +862,16 @@ document.addEventListener("click", async event => {
     else if (target.id === "brew-terminal") { await api("/api/brew-terminal", {}); document.getElementById("job").close(); showSuccess("Terminal is open. After it finishes, choose Scan now."); }
     else if (target.id === "tray-go") {
       const chosen = allItems().filter(i => view.selected.has(i.id));
-      askConfirm(`Move ${plural(chosen.length, "item")} to Trash?`, "To undo, open Trash in Finder and choose Put Back. Some apps may need setting up again.",
-        chosen.map(i => i.title + (i.size ? ` · ${size(i.size)}` : "")), "Move to Trash", true, async () => {
+      const isPersonal = i => i.category === "large" || i.category === "duplicates";
+      const personal = chosen.some(isPersonal);
+      const pathOf = i => ((view.data.technical[i.id] || {}).paths || [i.title])[0];
+      const stays = i => s_duplicates().filter(d => d.group === i.group && !view.selected.has(d.id)).map(pathOf);
+      const lines = chosen.map(i => (isPersonal(i) ? pathOf(i) : i.title) + (i.size ? ` · ${size(i.size)}` : "") + (i.category === "duplicates" && stays(i).length ? ` · Stays: ${stays(i)[0]}` : ""));
+      askConfirm(personal ? "Move your own files to Trash?" : `Move ${plural(chosen.length, "item")} to Trash?`,
+        personal ? "These are your own files, not temporary data, and nothing recreates them. Check each one. Emptying Trash deletes them for good." : "To undo, open Trash in Finder and choose Put Back. Some apps may need setting up again.",
+        lines, personal ? "Yes, move my files" : "Move to Trash", true, async () => {
           const ids = [...view.selected];
-          const result = await api("/api/trash", { ids });
+          const result = await api("/api/trash", { ids, confirm_personal: personal });
           view.selected.clear();
           await refresh();
           const failed = result.results.filter(r => !r.ok);

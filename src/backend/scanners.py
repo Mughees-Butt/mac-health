@@ -4,9 +4,11 @@ import json
 import os
 import plistlib
 import re
+import secrets
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -51,6 +53,115 @@ def run(cmd, timeout=30, env=None, merge_stderr=True):
         return result.returncode, result.stdout.decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError):
         return -1, ""
+
+
+# Programs your account can overwrite, like brew, must never run inside this app's process tree, where they
+# would inherit Full Disk Access. launchd starts them as a separate job that doesn't have it.
+OUTSIDE_JOB = """
+if [ -e "$1/done" ]; then exec /bin/sleep 3600; fi
+d=$1; merge=$2; shift 2
+if [ "$merge" = 1 ]; then "$@" >"$d/out" 2>&1 </dev/null; else "$@" >"$d/out" 2>/dev/null </dev/null; fi
+echo $? >"$d/rc"; : >"$d/done"
+exec /bin/sleep 3600
+"""
+outside_verified = False
+JOB_PREFIX = "local.machealth.job."
+JOB_OUTPUT_LIMIT = 32 * MB
+
+
+def spawn_outside(cmd, timeout, env, merge, on_output):
+    """Returns (exit code, output). Exit code -1 means it didn't finish. launchd restarts a submitted job
+    when it exits, so the job waits after running once until it's removed here."""
+    folder = tempfile.mkdtemp(prefix="machealth-job-")
+    label = JOB_PREFIX + secrets.token_hex(8)
+    settings = ["%s=%s" % pair for pair in sorted((env or {}).items())]
+    code = -1
+    output = b""
+    folder_fd = None
+    try:
+        folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        started = run(["/bin/launchctl", "submit", "-l", label, "--", "/bin/sh", "-c", OUTSIDE_JOB, "sh", folder, "1" if merge else "0",
+                       "/usr/bin/env", "-i", "HOME=%s" % HOME, "LANG=en_US.UTF-8"] + settings + list(cmd), timeout=10)
+        if started[0] != 0:
+            return -1, ""
+        deadline = time.time() + timeout
+        while True:
+            done = read_job_file(folder_fd, "done") is not None
+            fresh = (read_job_file(folder_fd, "out") or b"")[len(output):]
+            if fresh:
+                output += fresh
+                if on_output:
+                    on_output(fresh.decode("utf-8", "replace"))
+            if done:
+                code = int((read_job_file(folder_fd, "rc") or b"-1").strip() or -1)
+                break
+            if time.time() > deadline:
+                break
+            time.sleep(0.1)
+    except (OSError, ValueError):
+        code = -1
+    finally:
+        if folder_fd is not None:
+            os.close(folder_fd)
+        run(["/bin/launchctl", "remove", label], timeout=10)
+        shutil.rmtree(folder, ignore_errors=True)
+    return code, output.decode("utf-8", "replace")
+
+
+def read_job_file(folder_fd, name):
+    """The job could be a hostile program, and this process has Full Disk Access. So only a real, unshared file
+    it owns is ever read: a link or hard link here could point into a protected folder."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder_fd)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+            return None
+        return os.read(fd, JOB_OUTPUT_LIMIT)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def clear_leftover_jobs():
+    """Quitting mid-job can leave one waiting. Clear them when the app next opens."""
+    _, listed = run(["/bin/launchctl", "list"], timeout=10)
+    for label in re.findall(r"(%s[0-9a-f]+)\s*$" % re.escape(JOB_PREFIX), listed, re.M):
+        run(["/bin/launchctl", "remove", label], timeout=10)
+    root = tempfile.gettempdir()
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
+        if name.startswith("machealth-job-") and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def outside_is_isolated():
+    """Proves a separate job lacks Full Disk Access, by having one fail to read a folder this app can read."""
+    global outside_verified
+    if outside_verified:
+        return True
+    access = full_disk_access()
+    if access is False:
+        return True  # nothing to inherit, and checked again next time in case access is granted
+    folders = [f for f in (os.path.join(LIB, "Safari"), os.path.join(LIB, "Cookies")) if os.path.lexists(f)]
+    if access is not True or not folders:
+        return False
+    for folder in folders:
+        code, out = spawn_outside(["/bin/ls", folder], 15, None, True, None)
+        if code != 1 or "Operation not permitted" not in out:
+            return False
+    outside_verified = True
+    return True
+
+
+def run_outside(cmd, timeout=60, env=None, merge=False, on_output=None):
+    """Runs a program your account can overwrite, without this app's access. Refuses if that can't be proven."""
+    if not outside_is_isolated():
+        return -1, ""
+    return spawn_outside(cmd, timeout, env, merge, on_output)
 
 
 def du_bytes(path, timeout=45):
@@ -108,6 +219,19 @@ def newest_change_age(path, skip=(), budget=3.0, limit=50000):
             if stat.S_ISDIR(details.st_mode) and entry.name not in skip:
                 stack.append(entry.path)
     return (time.time() - newest) / DAY
+
+
+def stamp_of(info):
+    """Identifies the exact file seen, so an edited or replaced one isn't acted on with old information."""
+    return [info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino]
+
+
+def full_hash(path):
+    hasher = hashlib.blake2b(digest_size=20)
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * MB), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def pretty_path(path):
@@ -230,7 +354,7 @@ def scan_health(check_updates=True, last_scan=None):
 
 # ---------- Apps ----------
 
-def find_apps():
+def find_apps(coverage):
     found = set()
     for root in ("/Applications", os.path.join(HOME, "Applications"), "/System/Applications"):
         for current, dirs, _ in os.walk(root):
@@ -238,7 +362,9 @@ def find_apps():
                 if name.endswith(".app"):
                     found.add(os.path.join(current, name))
                     dirs.remove(name)
-    _, out = run(["/usr/bin/mdfind", "kMDItemContentType == 'com.apple.application-bundle'"], timeout=30)
+    code, out = run(["/usr/bin/mdfind", "kMDItemContentType == 'com.apple.application-bundle'"], timeout=30)
+    if code != 0:
+        coverage.append({"area": "App list", "status": "partial", "fix": "rescan", "note": "Spotlight didn't answer, so apps outside Applications may look uninstalled."})
     for line in out.splitlines():
         if line.endswith(".app") and ".app/" not in line and os.path.isdir(line):
             found.add(line)
@@ -251,8 +377,9 @@ def app_info(path):
     try:
         with open(os.path.join(path, "Contents", "Info.plist"), "rb") as handle:
             data = plistlib.load(handle)
-        info["bundle_id"] = data.get("CFBundleIdentifier")
-        info["version"] = data.get("CFBundleShortVersionString")
+        # Values come from the app's own files, so don't trust their types.
+        info["bundle_id"] = data["CFBundleIdentifier"] if isinstance(data.get("CFBundleIdentifier"), str) else None
+        info["version"] = data["CFBundleShortVersionString"] if isinstance(data.get("CFBundleShortVersionString"), str) else None
     except (OSError, ValueError, plistlib.InvalidFileException, Exception):
         pass
     return info
@@ -435,9 +562,16 @@ def scan_launch_items(apps):
                                     "This startup file can't be read, so it may be damaged.", "low", "medium",
                                     paths=[path], trashable=user_owned, technical={"path": path}))
                 continue
-            args = data.get("ProgramArguments") or []
-            program = data.get("Program") or (args[0] if args else None)
-            label = data.get("Label", name[:-6])
+            args = data.get("ProgramArguments") if isinstance(data, dict) else None
+            args = args if isinstance(args, list) else []
+            program = (data.get("Program") or (args[0] if args else None)) if isinstance(data, dict) else 0
+            label = data.get("Label", name[:-6]) if isinstance(data, dict) else name[:-6]
+            # A malformed file must not stop the files after it from being checked.
+            if (program and not isinstance(program, str)) or not isinstance(label, str) or not isinstance(data, dict):
+                results.append(item("alerts", "Malformed startup item: %s" % name,
+                                    "This startup file doesn't have the structure macOS expects, which is unusual, so check that you recognise it.", "medium", "medium",
+                                    paths=[path], trashable=user_owned, technical={"path": path}))
+                continue
             if not program:
                 # Nothing to diagnose: macOS or the vendor resolves these in its own way, so stay out.
                 continue
@@ -454,8 +588,9 @@ def scan_launch_items(apps):
                 continue
             owners = data.get("AssociatedBundleIdentifiers") or []
             owners = [owners] if isinstance(owners, str) else owners
-            owned_by_installed = any(vendor_of(o) in vendors for o in owners)
-            if program.startswith("/Library/PrivilegedHelperTools/") and vendor_of(label) not in vendors and not owned_by_installed:
+            owned_by_installed = any(isinstance(o, str) and vendor_of(o) in vendors for o in owners) if isinstance(owners, list) else False
+            # Only a root-owned file can claim a root helper. Otherwise any program could aim the admin prompt at one.
+            if not user_owned and program.startswith("/Library/PrivilegedHelperTools/") and vendor_of(label) not in vendors and not owned_by_installed:
                 state = launchd_state(label)
                 key = label.split(".")[1] if "." in label else label
                 helper_keys.add(key)  # a vendor match is weaker evidence than a missing program
@@ -765,7 +900,7 @@ def scan_leftovers(apps, coverage):
             plain += " The folder name is generic, so check it before removing it."
         movable = [p for p in group["paths"] if not p.startswith(locked_roots)] if locked_roots else group["paths"]
         locked = [p for p in group["paths"] if p not in movable]
-        action = "Removing it may reset settings if the app is ever reinstalled."
+        action = "This may be saved data, not just settings. Check the folder first, especially if the app is on an unplugged drive."
         if locked and not movable:
             action = "macOS protects this data, so this tool can't move it. It's safe to leave. To remove it, choose Show in Finder and try dragging it to Trash."
         elif locked:
@@ -818,7 +953,7 @@ def scan_clutter(coverage):
         for name in os.listdir(downloads):
             path = os.path.join(downloads, name)
             age = age_days(path)
-            if name.lower().endswith((".dmg", ".pkg", ".iso")) and age and age > 30:
+            if name.lower().endswith((".dmg", ".pkg", ".iso")) and age and age > 30 and os.path.isfile(path) and not os.path.islink(path):
                 size = du_bytes(path, timeout=15)
                 results.append(item("clutter", name, "An installer in Downloads that's %d days old. You generally don't need it after installing the app." % age,
                                     "info", "review", size=size, paths=[path], trashable=True,
@@ -844,7 +979,7 @@ BREW_QUERY_ENV = {"HOMEBREW_NO_AUTO_UPDATE": "1", "PATH": "/opt/homebrew/bin:/us
 
 def brew_query(brew, args, timeout=60):
     # Homebrew prints warnings on stderr, and those must not end up inside its JSON.
-    return run([brew] + args, timeout=timeout, env=BREW_QUERY_ENV, merge_stderr=False)
+    return run_outside([brew] + args, timeout=timeout, env=BREW_QUERY_ENV)
 
 
 def brew_json(brew, args, timeout=60):
@@ -969,7 +1104,7 @@ def scan_developer(coverage):
         ("Homebrew download cache", "Library/Caches/Homebrew", "safe", "Homebrew downloads packages again when needed."),
         ("pnpm package store", "Library/pnpm/store", "review", "Projects linked to it will need a fresh install."),
         ("Gradle cache", ".gradle/caches", "safe", "Gradle downloads these again on your next build."),
-        ("Maven repository", ".m2/repository", "safe", "Maven downloads these again on your next build."),
+        ("Maven repository", ".m2/repository", "review", "Most of this downloads again, but anything you built with mvn install can't."),
         ("Cargo registry", ".cargo/registry", "safe", "Cargo downloads these again on your next build."),
         ("General tool cache", ".cache", "review", "Shared by several tools, and may hold downloaded models."),
     ]
@@ -993,7 +1128,7 @@ def scan_developer(coverage):
 
     docker = shutil.which("docker", path="/usr/local/bin:/opt/homebrew/bin")
     if docker:
-        code, out = run([docker, "system", "df", "--format", "{{json .}}"], timeout=15)
+        code, out = run_outside([docker, "system", "df", "--format", "{{json .}}"], timeout=15)
         rows = []
         for line in out.splitlines():
             try:
@@ -1006,6 +1141,11 @@ def scan_developer(coverage):
                                 "info", key="docker", action="Review first, then run: docker system prune",
                                 technical={"docker_system_df": rows}))
     return results
+
+
+def has_lockfile(project):
+    """Without one, an install may not rebuild the same thing."""
+    return any(os.path.exists(os.path.join(project, n)) for n in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock", "npm-shrinkwrap.json"))
 
 
 def scan_files(coverage):
@@ -1048,7 +1188,9 @@ def scan_files(coverage):
                           "%s in %s, last changed %d days ago." % (fmt_size(info.st_size), pretty_path(os.path.dirname(path)), (time.time() - info.st_mtime) / DAY),
                           "info", "review", size=info.st_size, paths=[path], trashable=True,
                           technical={"path": path, "modified": time.strftime("%Y-%m-%d", time.localtime(info.st_mtime))}))
+        large[-1]["stamp"] = stamp_of(info)
 
+    seen_infos = dict(candidates)  # taken before hashing, so a change during the scan still shows
     by_size, seen = {}, set()
     for path, info in candidates:
         identity = (info.st_dev, info.st_ino)
@@ -1105,6 +1247,7 @@ def scan_files(coverage):
                                            "In %s. Identical copies: %d. Keep at least one." % (pretty_path(os.path.dirname(path)), len(same)),
                                            "info", "exact match", size=size, paths=[path], trashable=True, group=key,
                                            technical={"path": path, "blake2b": key}))
+                    duplicates[-1]["stamp"] = stamp_of(seen_infos[path])
 
     developer = []
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1117,7 +1260,7 @@ def scan_files(coverage):
             project = os.path.basename(os.path.dirname(path))
             developer.append(item("developer", "%s dependencies" % project,
                                   "The node_modules folder in a project untouched for %d days uses %s. Your install command can rebuild it." % (age, fmt_size(size)),
-                                  "info", "safe", size=size, paths=[path], trashable=True,
+                                  "info", "safe" if has_lockfile(os.path.dirname(path)) else "review", size=size, paths=[path], trashable=True,
                                   action="Run your package manager's install command when you return to the project.",
                                   technical={"path": path}))
     return large, duplicates, developer
@@ -1390,7 +1533,7 @@ def full_scan(progress=lambda stage, pct: None, last_scan=None):
     cards, raw = scan_health(check_updates=False, last_scan=last_scan)
 
     progress("Listing installed apps", 14)
-    paths = guarded("App list", find_apps, []) or []
+    paths = guarded("App list", lambda: find_apps(coverage), []) or []
     with ThreadPoolExecutor(max_workers=8) as pool:
         apps = list(pool.map(app_info, paths))
 

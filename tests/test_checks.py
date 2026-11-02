@@ -1,6 +1,7 @@
 """Checks for the behaviour most likely to mislead someone: false all-clears and unsafe removals.
 They use a temporary home folder and a fake brew, so they don't touch real results or change the Mac."""
 import os
+import json
 import plistlib
 import shutil
 import stat
@@ -24,6 +25,8 @@ class FakeBrew(unittest.TestCase):
     """Replaces brew with a script, printing a warning on stderr as the real one can."""
 
     def setUp(self):
+        self.addCleanup(setattr, scanners, "run_outside", scanners.run_outside)
+        scanners.run_outside = lambda cmd, timeout=60, env=None, merge=False, on_output=None: scanners.run(cmd, timeout=timeout, merge_stderr=merge)
         folder = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, folder)
         self.brew = os.path.join(folder, "brew")
@@ -149,7 +152,7 @@ class Actions(unittest.TestCase):
         self.addCleanup(setattr, server, "find_brew", server.find_brew)
         server.find_brew = lambda: "/fake/brew"
         self.addCleanup(setattr, scanners, "brew_dependents", scanners.brew_dependents)
-        server.state.update(reinstall={}, brew_ids=set(), tech={}, system_items={}, acting=False, scanning=False)
+        server.state.update(reinstall={}, brew_ids=set(), tech={}, system_items={}, acting=False, scanning=False, scanned_at=time.time())
 
     def test_reinstall_uses_force_only_for_apps_outside_homebrew(self):
         server.state["reinstall"]["a"] = {"token": "clipy", "installed": False}
@@ -210,6 +213,225 @@ class Actions(unittest.TestCase):
         server.end_action()
 
 
+class OutsideJob(unittest.TestCase):
+    def test_runs_once_and_reports_exit_code(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        marker = os.path.join(folder, "runs")
+        code, out = scanners.spawn_outside(["/bin/sh", "-c", 'echo run >> "$0"; echo hello; echo bad >&2; exit 3', marker], 20, None, False, None)
+        time.sleep(1.5)
+        self.assertEqual((code, out.strip()), (3, "hello"))
+        with open(marker) as handle:
+            self.assertEqual(handle.read().count("run"), 1)
+
+    def test_links_and_shared_files_are_never_read(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        secret = os.path.join(folder, "secret")
+        with open(secret, "w") as handle:
+            handle.write("protected")
+        job = os.path.join(folder, "job")
+        os.mkdir(job)
+        os.symlink(secret, job + "/link")
+        os.link(secret, job + "/hard")
+        os.mkfifo(job + "/pipe")
+        with open(job + "/plain", "w") as handle:
+            handle.write("ok")
+        fd = os.open(job, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        for name in ("link", "hard", "pipe", "missing"):
+            self.assertIsNone(scanners.read_job_file(fd, name), name)
+        self.assertEqual(scanners.read_job_file(fd, "plain"), b"ok")
+
+    def test_hostile_job_cannot_swap_its_output_for_a_link(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        secret = os.path.join(folder, "secret")
+        with open(secret, "w") as handle:
+            handle.write("protected-data")
+        script = 'd=$(ls -dt "${TMPDIR:-/tmp}"/machealth-job-* /tmp/machealth-job-* /var/folders/*/*/T/machealth-job-* 2>/dev/null | head -1); ln -sf "$0" "$d/out"; exit 0'
+        code, out = scanners.spawn_outside(["/bin/sh", "-c", script, secret], 20, None, False, None)
+        self.assertNotIn("protected-data", out)
+
+    def test_no_isolation_means_nothing_runs(self):
+        self.addCleanup(setattr, scanners, "outside_verified", scanners.outside_verified)
+        self.addCleanup(setattr, scanners, "spawn_outside", scanners.spawn_outside)
+        self.addCleanup(setattr, scanners, "full_disk_access", scanners.full_disk_access)
+        scanners.outside_verified = False
+        scanners.full_disk_access = lambda: True
+        calls = []
+        scanners.spawn_outside = lambda cmd, *rest: (calls.append(cmd), (0, "listed"))[1]  # the job could read a protected folder
+        self.assertEqual(scanners.run_outside(["/opt/homebrew/bin/brew"]), (-1, ""))
+        self.assertFalse(any("brew" in c[0] for c in calls))
+
+
+class SavedData(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder)
+
+    def test_script_in_counts_is_refused(self):
+        good = {"score": 1, "generated_at": 1, "cards": {"disk": {}, "memory": {}, "cpu": {}, "security": {}}, "tips": [], "coverage": [], "deductions": [],
+                "sections": {k: [] for k in ("alerts", "leftovers", "clutter", "developer", "large", "duplicates", "network", "startup")}}
+        self.assertTrue(server.valid_report(good))
+        bad = json.loads(json.dumps(good))
+        bad["sections"]["leftovers"] = {"length": "<img src=x onerror=alert(1)>"}
+        self.assertFalse(server.valid_report(bad))
+        self.assertFalse(server.valid_report(["not a report"]))
+        missing = json.loads(json.dumps(good))
+        missing["cards"] = {}
+        self.assertFalse(server.valid_report(missing))
+
+    def test_link_to_protected_file_is_not_read_or_appended(self):
+        real = os.path.join(self.folder, "secret")
+        with open(real, "w") as handle:
+            handle.write('{"t": 1}\n')
+        link = os.path.join(self.folder, "link")
+        os.symlink(real, link)
+        self.assertEqual(server.read_jsonl(link), [])
+        self.assertEqual(server.read_json(link, {}), {})
+        with self.assertRaises(OSError):
+            server.append_jsonl(link, {"t": 2})
+
+    def test_bad_rows_and_types_are_ignored(self):
+        path = os.path.join(self.folder, "h.jsonl")
+        with open(path, "w") as handle:
+            handle.write('5\n{"t":"x"}\n{"t":NaN}\n' + "[" * 100000 + '\n{"t":3}\n')
+        self.assertEqual(server.read_jsonl(path), [{"t": 3}])
+        with open(path, "w") as handle:
+            handle.write("[]")
+        self.assertEqual(server.read_json(path, {}), {})
+
+    def test_infinity_is_refused(self):
+        path = os.path.join(self.folder, "s.json")
+        with open(path, "w") as handle:
+            handle.write('{"a": 1e400}')
+        self.assertEqual(server.read_json(path, {}), {})
+
+    def test_hard_link_is_not_read(self):
+        real = os.path.join(self.folder, "real")
+        with open(real, "w") as handle:
+            handle.write('{"a": 1}')
+        link = os.path.join(self.folder, "hard")
+        os.link(real, link)
+        self.assertEqual(server.read_json(link, {}), {})
+
+    def test_pipe_cannot_hang_appending(self):
+        path = os.path.join(self.folder, "pipe")
+        os.mkfifo(path)
+        with self.assertRaises(OSError):
+            server.append_jsonl(path, {"t": 1})
+
+    def test_plist_dates_do_not_break_saving(self):
+        import datetime
+        self.assertIn("2020", server.to_json({"keep_alive": datetime.datetime(2020, 1, 1)}))
+
+    def test_housekeeping_only_deletes_its_own_files(self):
+        self.addCleanup(setattr, server, "TECH_DIR", server.TECH_DIR)
+        target = os.path.join(self.folder, "protected")
+        os.mkdir(target)
+        victim = os.path.join(target, "1.json")
+        open(victim, "w").close()
+        link = os.path.join(self.folder, "technical")
+        os.symlink(target, link)
+        server.TECH_DIR = link
+        server.delete_all_technical()
+        self.assertTrue(os.path.exists(victim))
+        os.remove(link)
+        os.mkdir(link)
+        other = os.path.join(link, "notes.txt")
+        open(other, "w").close()
+        server.delete_all_technical()
+        self.assertTrue(os.path.exists(other))
+
+
+class StartupFiles(unittest.TestCase):
+    def setUp(self):
+        self.folder = os.path.join(HOME, "Library", "LaunchAgents")
+        os.makedirs(self.folder, exist_ok=True)
+        for name in os.listdir(self.folder):
+            os.remove(os.path.join(self.folder, name))
+
+    def write(self, name, data):
+        with open(os.path.join(self.folder, name), "wb") as handle:
+            plistlib.dump(data, handle)
+
+    def test_your_own_file_cannot_claim_a_root_helper(self):
+        self.write("x.plist", {"Label": "com.fake.x", "Program": "/Library/PrivilegedHelperTools/com.example.helper"})
+        found = scanners.scan_launch_items([])
+        self.assertFalse([i for i in found if i.get("fix") and any(e["path"].endswith("com.example.helper") for e in i["technical"]["system_items"])])
+
+    def test_malformed_file_is_flagged_and_later_files_still_checked(self):
+        self.write("a.plist", {"Label": "a", "Program": 5})
+        downloads = os.path.join(HOME, "Downloads")
+        os.makedirs(downloads, exist_ok=True)
+        program = os.path.join(downloads, "evil")
+        open(program, "w").close()
+        self.write("b.plist", {"Label": "b", "Program": program})
+        titles = [i["title"] for i in scanners.scan_launch_items([])]
+        self.assertTrue(any("Malformed" in t and "a.plist" in t for t in titles))
+        self.assertTrue(any(t.endswith(": b") for t in titles))
+
+
+class LastCopy(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(dir=HOME)
+        self.addCleanup(shutil.rmtree, self.folder)
+        os.makedirs(server.DATA_DIR, exist_ok=True)
+        if os.path.exists(server.MOVED_COPIES_FILE):
+            os.remove(server.MOVED_COPIES_FILE)
+        for name in ("move_to_trash", "recalculate", "drop_items"):
+            self.addCleanup(setattr, server, name, getattr(server, name))
+        server.move_to_trash = lambda p: os.remove(p)
+        server.drop_items = lambda ids: None
+        server.state.update(acting=False, scanning=False, scanned_at=time.time())
+
+    def make(self, name, text="same"):
+        path = os.path.join(self.folder, name)
+        with open(path, "w") as handle:
+            handle.write(text)
+        return path
+
+    def duplicates(self, paths, group="g"):
+        server.state["actionable"] = {p: {"paths": [p], "group": group, "category": "duplicates", "size": 4, "stamp": server.file_stamp(p)} for p in paths}
+
+    def test_personal_files_need_their_own_confirmation(self):
+        paths = [self.make("a"), self.make("b")]
+        self.duplicates(paths)
+        self.assertEqual(server.trash_items(paths[:1])[1], 400)
+        self.assertTrue(os.path.exists(paths[0]))
+
+    def test_all_copies_refused_at_once_and_across_requests(self):
+        paths = [self.make(n) for n in "abc"]
+        self.duplicates(paths)
+        self.assertEqual(server.trash_items(paths, True)[1], 400)
+        self.assertEqual(server.trash_items(paths[:2], True)[1], 200)
+        server.state["actionable"] = {paths[2]: server.state["actionable"][paths[2]]}
+        self.assertEqual(server.trash_items(paths[2:], True)[1], 400)
+        self.assertTrue(os.path.exists(paths[2]))
+
+    def test_missing_copy_never_counts_as_the_one_kept(self):
+        paths = [self.make("a"), self.make("b")]
+        self.duplicates(paths)
+        server.state["actionable"][paths[1]]["stamp"] = None
+        os.remove(paths[1])
+        self.assertEqual(server.trash_items(paths[:1], True)[1], 400)
+        self.assertTrue(os.path.exists(paths[0]))
+
+    def test_last_copy_stays_protected_after_a_rescan(self):
+        paths = [self.make("a"), self.make("b")]
+        self.duplicates(paths, group=scanners.full_hash(paths[0]))
+        self.assertEqual(server.trash_items(paths[:1], True)[1], 200)
+        server.state["actionable"] = {paths[1]: {"paths": [paths[1]], "group": None, "category": "large", "size": 4, "stamp": server.file_stamp(paths[1])}}
+        result = server.trash_items(paths[1:], True)[0]
+        self.assertIn("last one", result["results"][0]["failures"][0]["reason"])
+        self.assertTrue(os.path.exists(paths[1]))
+
+    def test_old_scans_cannot_change_anything(self):
+        server.state["scanned_at"] = time.time() - 7200
+        self.assertEqual(server.trash_items([], True)[1], 409)
+
+
 class Paths(unittest.TestCase):
     def test_protected_and_outside_paths_are_refused(self):
         self.assertIsNotNone(server.path_problem(HOME))
@@ -217,6 +439,34 @@ class Paths(unittest.TestCase):
         self.assertIsNotNone(server.path_problem("/etc/hosts"))
         self.assertIsNotNone(server.path_problem(HOME + "/a/../b"))
         self.assertIsNone(server.path_problem(os.path.join(HOME, "Library", "Caches", "Example")))
+
+    def test_case_and_sensitive_folders_are_refused(self):
+        for tail in ("library", "DOCUMENTS", "Library/keychains/login.keychain-db", ".ssh", ".ssh/id_ed25519", ".gnupg", "Library/Mobile Documents/x",
+                     "Library/Messages/chat.db", "Library/Mail/V10", "Pictures/Photos Library.photoslibrary"):
+            self.assertIsNotNone(server.path_problem(os.path.join(HOME, tail)), tail)
+        self.assertIsNotNone(server.path_problem("/" + HOME + "/Documents"))
+
+
+class RootCommand(unittest.TestCase):
+    def test_hostile_names_are_quoted(self):
+        self.addCleanup(setattr, server, "run_admin", server.run_admin)
+        self.addCleanup(setattr, server, "system_item_problem", server.system_item_problem)
+        commands = []
+        server.run_admin = lambda c: (commands.append(c), (False, "stop"))[1]
+        server.system_item_problem = lambda p: None
+        server.state["scanned_at"] = time.time()
+        server.state["system_items"] = {"e": {"system": [{"path": "/Library/LaunchDaemons/a$(id)'b.plist", "label": "l;touch /tmp/x"}], "user": []}}
+        server.remove_system_item("e")
+        self.assertIn("'l;touch /tmp/x'", commands[0])
+        self.assertIn("$(id)", commands[0].split("/bin/mv -n ")[1].split("\"$HOLD\"")[0].split("'")[1])
+        self.assertIn("find -d", commands[0])
+        self.assertIn("-links 1", commands[0])
+
+
+class PackageNames(unittest.TestCase):
+    def test_option_like_names_are_refused(self):
+        self.assertIsNone(server.scanners.re.fullmatch(server.PACKAGE_NAME, "--zap"))
+        self.assertIsNotNone(server.scanners.re.fullmatch(server.PACKAGE_NAME, "gstreamer-runtime"))
 
 
 if __name__ == "__main__":

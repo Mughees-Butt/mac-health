@@ -18,6 +18,7 @@ sys.modules["scanners"] = module
 exec(compile(payload["files"]["server.py"], "server.py", "exec"), {"__name__": "__main__", "MAC_HEALTH_PAYLOAD": payload})
 """
 
+private let pythonPath = "/Library/Developer/CommandLineTools/usr/bin/python3"
 private let scanRequest = Notification.Name("local.machealth.scan-request")
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
@@ -67,7 +68,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let process = Process()
         let input = Pipe()
         let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        // The real interpreter, not the /usr/bin/python3 shim, which finds it through a cache your account can change.
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: pythonPath),
+              (attributes[.ownerAccountID] as? NSNumber)?.intValue == 0 else {
+            fail("Mac Health needs the Command Line Tools. Install them with: xcode-select --install")
+            return
+        }
+        process.executableURL = URL(fileURLWithPath: pythonPath)
         // -I and -B ignore Python environment settings and local modules, and never write cache files.
         process.arguments = ["-I", "-B", "-c", bootstrap]
         process.environment = [

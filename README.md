@@ -24,10 +24,10 @@ Removals go to Trash. Admin actions use macOS's own password prompt, and Homebre
 ## Requirements
 
 - macOS 13 or later
-- Xcode Command Line Tools, for `swiftc` and `/usr/bin/python3`: `xcode-select --install`
+- Xcode Command Line Tools, for `swiftc` and Python: `xcode-select --install`. Xcode alone isn't enough, because the app only runs the root-owned Python these tools install.
 - Optional: [Homebrew](https://brew.sh), for package checks and fixes
 
-The app uses the system Python and needs no third-party packages.
+The app needs no third-party packages.
 
 ## Install
 
@@ -77,7 +77,7 @@ src/ui/index.html         The whole interface in one file
 tests/                    Automated checks
 ```
 
-Python must stay 3.9 compatible with no third-party packages, because the app runs `/usr/bin/python3`.
+Python must stay 3.9 compatible with no third-party packages, because the app runs the Command Line Tools' Python.
 
 ## Tests
 
@@ -95,9 +95,25 @@ To run the interface from source, without Full Disk Access, see the comments at 
 - The app checks its code against built-in hashes, then passes those exact bytes to Python in memory.
 - A one-time token travels the same way and is never written to disk.
 - The server listens only on `127.0.0.1`, on a random port, and checks the token, Host and Origin.
-- Your data stays in `~/.mac-health`, readable only by your account. Homebrew fixes go online when you ask.
+- Your data stays in `~/.mac-health`. Homebrew fixes go online when you ask.
 
-**Limits:** it can't prove a Mac is free of malware. Another program running as you can see much of what you can, and could try to trick you into approving a prompt. Whether the hardened runtime actually blocks injection hasn't been tested.
+### What has which access
+
+| Part | Has | Why |
+|---|---|---|
+| Mac Health | Full Disk Access | To read protected folders during a scan |
+| Homebrew and Docker checks | No Full Disk Access | Your account can change them, so they run as a separate job. If the app can't prove that job lacks access, they don't run. |
+| Removing system files | Admin, once | macOS asks each time, and the app lists the files first |
+| Terminal fixes | What Terminal has | So you can see each command and only macOS sees your password |
+
+### Limits
+
+- **It can't prove a Mac is free of malware.** A clean result means nothing looked wrong, not that nothing is wrong.
+- **Other programs running as you can see what you can.** macOS doesn't separate programs in one account, except for protected folders. That includes saved results in `~/.mac-health`, which can contain file names from protected folders.
+- **Someone could try to trick you into approving a prompt.** Read what's listed, and cancel anything you didn't start.
+- **A program running as you could change this source before you build it.** The build uses a clean environment, but can't prevent that.
+
+Tested: injecting a library into the signed app was blocked, and attaching to it or its Python process was refused from a normal program.
 
 ## Uninstall
 

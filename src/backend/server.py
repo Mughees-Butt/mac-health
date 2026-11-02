@@ -12,12 +12,14 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import secrets
 import tempfile
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # The app verifies this code, then passes the exact bytes in memory, so nothing is read from disk after that check.
@@ -35,6 +37,7 @@ HISTORY_FILE = os.path.join(DATA_DIR, "history.jsonl")
 ACTIONS_FILE = os.path.join(DATA_DIR, "actions.jsonl")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 FIRST_SEEN_FILE = os.path.join(DATA_DIR, "first_seen.json")
+MOVED_COPIES_FILE = os.path.join(DATA_DIR, "moved_copies.json")
 
 DAY = 86400
 HISTORY_RETENTION_DAYS = 90
@@ -42,6 +45,7 @@ ACTIONS_RETENTION_DAYS = 30
 TTL_CHOICES = (1, 3, 7, 14, 30)
 DEFAULT_TTL_DAYS = 7
 JOB_LOG_LIMIT = 40000
+SCAN_VALID_SECONDS = 3600  # changes need a recent scan, because an app can be reinstalled or a file reused since
 
 TOKEN = None
 PORT = None
@@ -82,7 +86,7 @@ end run
 
 state_lock = threading.Lock()
 state = {"scanning": False, "stage": None, "percent": 0, "error": None, "report": None, "tech": {}, "system_tech": None,
-         "acting": False, "tech_expires": None, "actionable": {}, "revealable": {}, "system_items": {}, "admin_network": None, "brew_ids": set(), "reinstall": {},
+         "acting": False, "tech_expires": None, "actionable": {}, "revealable": {}, "system_items": {}, "admin_network": None, "brew_ids": set(), "reinstall": {}, "scanned_at": None,
          "job": {"name": None, "running": False, "log": "", "ok": None, "summary": None}}
 
 
@@ -92,33 +96,65 @@ state = {"scanning": False, "stage": None, "percent": 0, "error": None, "report"
 storage_lock = threading.RLock()
 
 
-def write_private(path, text):
+def write_private(path, text, mode=0o600):
     with storage_lock:
-        fd, temp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+        fd, temp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".tmp-")
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
         os.replace(temp, path)
 
 
+def open_private(path):
+    """Opens only a real file. Another program could replace one with a link into a protected folder or a pipe."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        os.close(fd)
+        raise OSError("Not a regular, unshared file")
+    return os.fdopen(fd, encoding="utf-8")
+
+
+def reject_constant(name):
+    raise ValueError(name)
+
+
+def finite_float(text):
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError(text)
+    return value
+
+
+def to_json(value):
+    return json.dumps(value, default=str)  # plist values can be dates or data
+
+
 def read_jsonl(path):
     rows = []
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open_private(path) as handle:
             for line in handle:
                 try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    pass
-    except OSError:
+                    row = json.loads(line, parse_constant=reject_constant, parse_float=finite_float)
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("t"), (int, float)):
+                    rows.append(row)
+    except (OSError, ValueError):
         pass
     return rows
 
 
 def append_jsonl(path, row):
     with storage_lock:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            os.close(fd)
+            raise OSError("Not a regular, unshared file")
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row) + "\n")
+            handle.write(to_json(row) + "\n")
 
 
 def prune_jsonl(path, retention_days):
@@ -127,15 +163,17 @@ def prune_jsonl(path, retention_days):
         rows = read_jsonl(path)
         kept = [r for r in rows if r.get("t", 0) >= cutoff]
         if len(kept) != len(rows):
-            write_private(path, "".join(json.dumps(r) + "\n" for r in kept))
+            write_private(path, "".join(to_json(r) + "\n" for r in kept))
 
 
 def read_json(path, fallback):
+    """Anything malformed, or of the wrong type, counts as missing."""
     try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
+        with open_private(path) as handle:
+            value = json.load(handle, parse_constant=reject_constant, parse_float=finite_float)
+    except (OSError, ValueError, RecursionError):
         return fallback
+    return value if fallback is None or isinstance(value, type(fallback)) else fallback
 
 
 def get_ttl_days():
@@ -147,17 +185,14 @@ def purge_expired():
     """Delete technical summaries past their expiry, and old history and action logs."""
     now = time.time()
     try:
-        for name in os.listdir(REMOVED_DIR):
-            os.rmdir(os.path.join(REMOVED_DIR, name))  # only succeeds on empty folders
+        if not os.path.islink(REMOVED_DIR):
+            for name in os.listdir(REMOVED_DIR):
+                os.rmdir(os.path.join(REMOVED_DIR, name))  # only succeeds on empty folders
     except OSError:
         pass
-    try:
-        names = os.listdir(TECH_DIR)
-    except OSError:
-        names = []
-    for name in names:
-        path = os.path.join(TECH_DIR, name)
-        if read_json(path, {}).get("expires_at", 0) <= now:
+    for path in technical_files():
+        expires = read_json(path, {}).get("expires_at", 0)
+        if not isinstance(expires, (int, float)) or expires <= now:
             try:
                 os.remove(path)
             except OSError:
@@ -169,37 +204,97 @@ def purge_expired():
     prune_jsonl(ACTIONS_FILE, ACTIONS_RETENTION_DAYS)
 
 
-def delete_all_technical():
+def technical_files():
+    """Only files this app wrote. This deletes for real, so it never follows a link or touches anything else."""
+    if os.path.islink(TECH_DIR):
+        return []
     try:
-        for name in os.listdir(TECH_DIR):
-            os.remove(os.path.join(TECH_DIR, name))
+        names = os.listdir(TECH_DIR)
     except OSError:
-        pass
+        return []
+    found = []
+    for name in sorted(names):
+        path = os.path.join(TECH_DIR, name)
+        try:
+            if scanners.re.fullmatch(r"\d+\.json", name) and stat.S_ISREG(os.lstat(path).st_mode):
+                found.append(path)
+        except OSError:
+            pass
+    return found
+
+
+def delete_all_technical():
+    for path in technical_files():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     with state_lock:
         state["tech"], state["system_tech"], state["tech_expires"] = {}, None, None
 
 
+def valid_report(report):
+    """Saved results are readable and writable by any program running as you, so check them before showing them."""
+    if not isinstance(report, dict) or not isinstance(report.get("sections"), dict) or not isinstance(report.get("cards"), dict):
+        return False
+    if not all(isinstance(report["cards"].get(k), dict) for k in ("disk", "memory", "cpu", "security")):
+        return False
+    if not all(isinstance(report.get(k, []), list) for k in ("limits", "can_do")):
+        return False
+    if not all(isinstance(report.get(k), (int, float)) for k in ("score", "generated_at")):
+        return False
+    lists = [report["sections"].get(k) for k in ("alerts", "leftovers", "clutter", "developer", "large", "duplicates", "network", "startup")]
+    lists += [report.get(k) for k in ("tips", "coverage", "deductions")]
+    if not all(isinstance(rows, list) and all(isinstance(r, dict) for r in rows) for rows in lists):
+        return False
+    return all(isinstance(c.get("area"), str) for c in report["coverage"])
+
+
 def load_saved():
     """Restore the last results after a restart. Actions stay off until a fresh scan."""
-    state["report"] = read_json(PLAIN_FILE, None)
+    saved_report = read_json(PLAIN_FILE, None)
+    state["report"] = saved_report if valid_report(saved_report) else None
     if not state["report"]:
         return
-    try:
-        files = sorted(os.listdir(TECH_DIR))
-    except OSError:
-        return
+    files = technical_files()
     if files:
-        saved = read_json(os.path.join(TECH_DIR, files[-1]), {})
-        if saved.get("expires_at", 0) > time.time():
-            state["tech"] = saved.get("items", {})
+        saved = read_json(files[-1], {})
+        expires = saved.get("expires_at", 0)
+        if isinstance(expires, (int, float)) and expires > time.time() and isinstance(saved.get("items"), dict):
+            state["tech"] = saved["items"]
             state["system_tech"] = saved.get("system")
-            state["tech_expires"] = saved["expires_at"]
+            state["tech_expires"] = expires
+
+
+def secure_subfolders():
+    for folder in (TECH_DIR, REMOVED_DIR):
+        if os.path.islink(folder):
+            os.remove(folder)
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+
+
+def secure_data_folders():
+    """A link here would turn this app's own housekeeping into changes inside a protected folder.
+    The app then works from inside the folder it checked, so swapping the name later doesn't redirect it."""
+    global TECH_DIR, REMOVED_DIR, PLAIN_FILE, HISTORY_FILE, ACTIONS_FILE, SETTINGS_FILE, FIRST_SEEN_FILE, MOVED_COPIES_FILE
+    if os.path.islink(DATA_DIR):
+        print("~/.mac-health is a link, so Mac Health won't use it.", file=sys.stderr)
+        sys.exit(1)
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(DATA_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    os.fchmod(fd, 0o700)
+    os.fchdir(fd)
+    os.close(fd)
+    TECH_DIR, REMOVED_DIR = "technical", "removed"
+    PLAIN_FILE, HISTORY_FILE, ACTIONS_FILE = "latest.json", "history.jsonl", "actions.jsonl"
+    SETTINGS_FILE, FIRST_SEEN_FILE, MOVED_COPIES_FILE = "settings.json", "first_seen.json", "moved_copies.json"
+    secure_subfolders()
 
 
 def set_setting(key, value):
     settings = read_json(SETTINGS_FILE, {})
     settings[key] = value
-    write_private(SETTINGS_FILE, json.dumps(settings))
+    write_private(SETTINGS_FILE, to_json(settings))
 
 
 def recalculate(report):
@@ -207,17 +302,17 @@ def recalculate(report):
     report["score"], report["deductions"] = scanners.build_score(report["cards"], report["sections"])
     report["tips"] = scanners.build_tips(report["cards"], report["sections"])
     stamp_first_seen(report["tips"])
-    write_private(PLAIN_FILE, json.dumps(report))
+    write_private(PLAIN_FILE, to_json(report))
 
 
 def stamp_first_seen(tips):
     """Remember when each recommendation first appeared, so the dashboard can say how long it's waited."""
     seen = read_json(FIRST_SEEN_FILE, {})
     now = time.time()
-    current = {t["key"]: seen.get(t["key"], now) for t in tips}
+    current = {t["key"]: seen[t["key"]] if isinstance(seen.get(t["key"]), (int, float)) else now for t in tips}
     for tip in tips:
         tip["days_waiting"] = int((now - current[tip["key"]]) / DAY)
-    write_private(FIRST_SEEN_FILE, json.dumps(current))
+    write_private(FIRST_SEEN_FILE, to_json(current))
 
 
 # ---------- Scan ----------
@@ -256,14 +351,15 @@ def do_scan():
             for entry in items:
                 tech[entry["id"]] = entry.pop("technical")
                 paths = entry.pop("paths")
+                stamp = entry.pop("stamp", None)
                 if paths:
                     tech[entry["id"]].setdefault("paths", paths)
                 if entry.get("locked"):
                     revealable[entry["id"]] = tech[entry["id"]]["protected_paths"][0]
                 if entry["trashable"]:
-                    actionable[entry["id"]] = {"paths": paths, "group": entry["group"], "category": entry["category"]}
+                    actionable[entry["id"]] = {"paths": paths, "group": entry["group"], "category": entry["category"], "size": entry["size"]}
                     if entry["category"] in ("large", "duplicates"):
-                        actionable[entry["id"]]["stamp"] = file_stamp(paths[0])
+                        actionable[entry["id"]]["stamp"] = stamp
                 if entry.get("fix") and entry["fix"]["kind"] == "admin_remove":
                     system_items[entry["id"]] = {"system": tech[entry["id"]]["system_items"], "user": tech[entry["id"]].get("user_items", [])}
                 if tech[entry["id"]].get("reinstall"):
@@ -274,11 +370,11 @@ def do_scan():
         system = {"cards": report["cards"], "command_output": report["meta"].pop("raw")}
         expires = time.time() + get_ttl_days() * DAY
 
-        os.makedirs(TECH_DIR, mode=0o700, exist_ok=True)
+        secure_subfolders()
         delete_all_technical()
         write_private(os.path.join(TECH_DIR, "%d.json" % report["generated_at"]),
-                      json.dumps({"expires_at": expires, "items": tech, "system": system}))
-        write_private(PLAIN_FILE, json.dumps(report))
+                      to_json({"expires_at": expires, "items": tech, "system": system}))
+        write_private(PLAIN_FILE, to_json(report))
 
         sizes = lambda name: sum(i["size"] or 0 for i in report["sections"][name])
         append_jsonl(HISTORY_FILE, {
@@ -290,7 +386,7 @@ def do_scan():
         purge_expired()
         with state_lock:
             state.update(report=report, tech=tech, system_tech=system, tech_expires=expires, actionable=actionable,
-                         revealable=revealable, system_items=system_items, brew_ids=brew_ids, reinstall=reinstall, error=None)
+                         revealable=revealable, system_items=system_items, brew_ids=brew_ids, reinstall=reinstall, scanned_at=time.time(), error=None)
     except Exception as error:
         with state_lock:
             state["error"] = "The scan failed: %s" % error
@@ -301,18 +397,28 @@ def do_scan():
 
 # ---------- Trash ----------
 
+def folded(path):
+    """macOS treats names as the same regardless of case or accent form, so comparisons must too."""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+# Never moved, nor anything inside them, even if a scan result names them.
+NEVER_MOVED = tuple(folded(os.path.join(HOME, n)) for n in (
+    ".ssh", ".gnupg", "Library/Keychains", "Library/Mobile Documents", "Library/Messages", "Library/Mail"))
+PROTECTED_FOLDED = {folded(p) for p in PROTECTED}
+
+
 def path_problem(path):
     """Return why a path may not be moved, or None if it's allowed."""
     clean = os.path.normpath(path)
-    if clean != path or not os.path.isabs(path):
+    if clean != path or not os.path.isabs(path) or path.startswith("//"):
         return "The path isn't valid."
-    if path.rstrip("/") in PROTECTED:
-        return "This is a protected folder."
     parent = os.path.realpath(os.path.dirname(path))
     target = os.path.join(parent, os.path.basename(path))
-    if os.path.join(HOME, "Library", "Keychains") in target or os.path.join(HOME, "Library", "Mobile Documents") == target:
-        return "This is a protected folder."
-    if target.startswith(HOME + "/"):
+    for candidate in (folded(path), folded(target)):
+        if candidate in PROTECTED_FOLDED or any(candidate == n or candidate.startswith(n + "/") for n in NEVER_MOVED) or ".photoslibrary" in candidate:
+            return "This is a protected folder."
+    if folded(target).startswith(folded(HOME) + "/"):
         return None
     if parent == "/Applications" and target.endswith(".app"):
         return None
@@ -334,7 +440,7 @@ def file_stamp(path):
         info = os.lstat(path)
     except OSError:
         return None
-    return [info.st_size, info.st_mtime_ns, info.st_ino]
+    return scanners.stamp_of(info)
 
 
 def begin_action():
@@ -351,12 +457,47 @@ def end_action():
         state["acting"] = False
 
 
-def trash_items(ids):
+def scan_too_old():
+    with state_lock:
+        scanned = state["scanned_at"]
+    return not scanned or time.time() - scanned > SCAN_VALID_SECONDS
+
+
+TOO_OLD = {"error": "This scan is over an hour old. Scan again, then retry."}, 409
+
+
+def already_moved_copy(entry, path):
+    """A rescan can't see copies in Trash, so remember them. Only a large file can lose its duplicate label this way."""
+    size = str(entry.get("size"))
+    known = read_json(MOVED_COPIES_FILE, {}).get(size)
+    if entry["category"] != "large" or not isinstance(known, list):
+        return False
+    try:
+        return scanners.full_hash(path) in known
+    except OSError:
+        return False
+
+
+def remember_moved_copy(entry, digest):
+    with storage_lock:
+        known = read_json(MOVED_COPIES_FILE, {})
+        known.setdefault(str(entry["size"]), [])
+        if isinstance(known[str(entry["size"])], list):
+            known[str(entry["size"])].append(digest)
+        write_private(MOVED_COPIES_FILE, to_json(known))
+
+
+def trash_items(ids, personal_ok=False):
+    if scan_too_old():
+        return TOO_OLD
     with state_lock:
         actionable = dict(state["actionable"])
     unknown = [i for i in ids if i not in actionable]
     if unknown:
         return {"error": "Some items aren't from your latest scan. Scan again, then retry."}, 409
+    # Your own files take a separate confirmation from anything that rebuilds itself.
+    if not personal_ok and any(actionable[i]["category"] in ("large", "duplicates") for i in ids):
+        return {"error": "Moving your own files needs its own confirmation."}, 400
 
     # One file can be listed under Large files and Duplicates, so compare paths, not just item ids.
     chosen_paths = {path for item_id in ids for path in actionable[item_id]["paths"]}
@@ -366,7 +507,7 @@ def trash_items(ids):
             groups.setdefault(entry["group"], []).append(entry)
     for members in groups.values():
         if chosen_paths & {m["paths"][0] for m in members}:
-            survivors = [m for m in members if m["paths"][0] not in chosen_paths and file_stamp(m["paths"][0]) == m.get("stamp")]
+            survivors = [m for m in members if m["paths"][0] not in chosen_paths and m.get("stamp") and file_stamp(m["paths"][0]) == m["stamp"]]
             if not survivors:
                 return {"error": "Keep at least one unchanged copy of each duplicate. Deselect one copy or scan again, then retry."}, 400
 
@@ -378,11 +519,16 @@ def trash_items(ids):
             if "stamp" in entry and os.path.lexists(path) and file_stamp(path) != entry["stamp"]:
                 failures.append({"name": os.path.basename(path), "reason": "It changed after the scan, so it wasn't moved"})
                 continue
+            if already_moved_copy(entry, path):
+                failures.append({"name": os.path.basename(path), "reason": "An identical copy was already moved to Trash, so this may be the last one"})
+                continue
             problem = path_problem(path) or move_to_trash(path)
             if problem and problem != "It's already gone.":
                 failures.append({"name": os.path.basename(path), "reason": problem})
             elif not problem:
                 append_jsonl(ACTIONS_FILE, {"t": time.time(), "action": "moved_to_trash", "path": path})
+                if entry["group"]:
+                    remember_moved_copy(entry, entry["group"])
         results.append({"id": item_id, "ok": not failures, "failures": failures})
 
     done_paths = set()
@@ -429,6 +575,8 @@ def system_item_problem(path):
 
 def remove_system_item(item_id):
     """Unload the startup files, then move them to Trash. A row can hold system files and files of your own."""
+    if scan_too_old():
+        return TOO_OLD
     with state_lock:
         targets = state["system_items"].get(item_id)
     if not targets:
@@ -450,14 +598,20 @@ def remove_system_item(item_id):
                 steps.append("/bin/launchctl bootout system/%s 2>/dev/null" % label)
                 steps.append("/bin/launchctl bootout gui/%d/%s 2>/dev/null" % (uid, label))
             steps.append('/bin/mv -n %s "$HOLD"/' % shlex.quote(entry["path"]))
-        steps.append('/usr/sbin/chown -hR %d "$HOLD"' % uid)
+        # A hard link inside could be another root file, so linked files are never handed over.
+        # Depth first, so the folder that keeps other programs out is handed over last.
+        steps.append('/usr/bin/find -d "$HOLD" \\( -type d -o -links 1 \\) -exec /usr/sbin/chown -h %d {} +' % uid)
         steps.append('echo "$HOLD"')
         ok, output = run_admin("; ".join(steps))
         if not ok:
             return {"error": output.strip() or "macOS didn't allow this change."}, 400
         lines = output.strip().splitlines()
         hold = lines[-1] if lines else ""
-        if not scanners.re.fullmatch(r"/private/tmp/machealth\.[A-Za-z0-9]+", hold) or os.lstat(hold).st_uid != uid:
+        try:
+            confirmed = scanners.re.fullmatch(r"/private/tmp/machealth\.[A-Za-z0-9]+", hold) and os.lstat(hold).st_uid == uid
+        except OSError:
+            confirmed = False
+        if not confirmed:
             return {"error": "macOS didn't confirm this change, so scan again to check."}, 400
         for name in os.listdir(hold):
             path = os.path.join(hold, name)
@@ -465,8 +619,11 @@ def remove_system_item(item_id):
             if move_to_trash(path):
                 # Temporary folders get cleared, so keep anything Trash refused somewhere it will last.
                 kept = tempfile.mkdtemp(dir=REMOVED_DIR)
-                shutil.move(path, kept)
-                note = "macOS wouldn't move it to Trash, so a copy is in %s." % scanners.pretty_path(kept)
+                try:
+                    shutil.move(path, kept)
+                    note = "macOS wouldn't move it to Trash, so a copy is in %s." % scanners.pretty_path(kept)
+                except OSError:
+                    note = "macOS wouldn't move part of this to Trash, so it's still in %s." % hold
         try:
             os.rmdir(hold)
         except OSError:
@@ -526,7 +683,7 @@ def admin_network_check():
     return {"ok": True}, 200
 
 
-PACKAGE_NAME = r"[A-Za-z0-9@._+-]+"
+PACKAGE_NAME = r"[A-Za-z0-9@][A-Za-z0-9@._+-]*"  # a leading dash would read as an option
 BREW_ENV = {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOMEBREW_NO_ENV_HINTS": "1",
             "NONINTERACTIVE": "1", "HOMEBREW_NO_AUTO_UPDATE": "1"}
 
@@ -543,13 +700,7 @@ def job_log(text):
 def run_brew_step(brew, args, env):
     """Runs one brew command, streaming to the log. Returns (exit code, output)."""
     job_log("$ brew %s\n" % " ".join(args))
-    process = subprocess.Popen([brew] + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
-    captured = []
-    for line in iter(process.stdout.readline, b""):
-        text = line.decode("utf-8", "replace")
-        captured.append(text)
-        job_log(text)
-    return process.wait(), "".join(captured)
+    return scanners.run_outside([brew] + args, timeout=3600, env=env, merge=True, on_output=job_log)
 
 
 def refresh_brew_item():
@@ -595,7 +746,7 @@ def run_brew_steps():
     if not brew:
         job_log("Homebrew wasn't found.\n")
         return False, summary
-    env = dict(os.environ, **BREW_ENV)
+    env = dict(BREW_ENV)
 
     def outdated():
         text = run_quiet(brew, ["outdated", "--json=v2"], env)
@@ -612,7 +763,7 @@ def run_brew_steps():
     # Casks run one at a time, so one that needs a password can't stop the rest.
     for cask in sorted(before_casks):
         code, output = run_brew_step(brew, ["upgrade", "--cask", cask], env)
-        if "password is required" in output or "a terminal is required" in output:
+        if "password is required" in output or "a terminal is required" in output or "Operation not permitted" in output:
             summary["needs_password"].append(cask)
         elif "Not upgrading" in output or "is disabled" in output:
             summary["disabled"].append(cask)  # brew exits successfully when it refuses, so read the output
@@ -630,17 +781,13 @@ def run_brew_steps():
 
 
 def run_quiet(brew, args, env):
-    try:
-        return subprocess.run([brew] + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-                              env=env, timeout=120).stdout.decode("utf-8", "replace")
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    return scanners.run_outside([brew] + args, timeout=120, env=env)[1]
 
 
 def open_terminal_script(lines):
     path = os.path.join(DATA_DIR, "mac-health-brew.command")
-    write_private(path, "#!/bin/zsh\n%s\necho\necho 'Done. Go back to Mac Health and scan again.'\nrm -f %s\n" % ("\n".join(lines), shlex.quote(path)))
-    os.chmod(path, 0o700)
+    name = os.path.basename(path) if not os.path.isabs(TECH_DIR) else path  # relative once the app works from inside its folder
+    write_private(name, "#!/bin/zsh\n%s\necho\necho 'Done. Go back to Mac Health and scan again.'\nrm -f %s\n" % ("\n".join(lines), shlex.quote(path)), mode=0o700)
     scanners.run(["/usr/bin/open", "-a", "Terminal", path], timeout=10)
 
 
@@ -651,6 +798,8 @@ def brew_remove_in_terminal(item_id):
         fresh = item_id in state["brew_ids"]  # saved results stay read-only until a new scan
     if not fresh:
         return {"error": "This can't be removed from here. Scan again."}, 400
+    if scan_too_old():
+        return TOO_OLD
     name, kind = tech.get("package"), tech.get("kind")
     together = tech.get("remove_with") or []
     packages = together + [name]  # what needs it goes first
@@ -669,6 +818,8 @@ def brew_remove_in_terminal(item_id):
 
 def brew_reinstall_in_terminal(item_id):
     """Replaces an app this scan found damaged with Homebrew's copy."""
+    if scan_too_old():
+        return TOO_OLD
     with state_lock:
         cask = state["reinstall"].get(item_id)
     brew = find_brew()
@@ -682,6 +833,8 @@ def brew_reinstall_in_terminal(item_id):
 
 def brew_finish_in_terminal():
     """Terminal can ask for the password. The script is built here and only names packages brew reported."""
+    if scan_too_old():
+        return TOO_OLD
     with state_lock:
         names = list((state["job"].get("summary") or {}).get("needs_password") or [])
     brew = find_brew()
@@ -695,6 +848,7 @@ def brew_finish_in_terminal():
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "MacHealth"
+    timeout = 15  # an idle connection can't hold a thread forever
     sys_version = ""
 
     def log_message(self, *args):
@@ -713,7 +867,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_json(self, data, code=200):
-        self.send_body(code, json.dumps(data).encode("utf-8"))
+        self.send_body(code, to_json(data).encode("utf-8"))
 
     def allowed(self):
         # The Host and Origin checks block other websites. The token blocks local programs and other accounts.
@@ -741,24 +895,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "Not allowed."}, 403)
         if path == "/api/status":
             with state_lock:
-                return self.send_json({"scanning": state["scanning"], "stage": state["stage"],
-                                       "percent": state["percent"], "error": state["error"]})
+                data = {"scanning": state["scanning"], "stage": state["stage"], "percent": state["percent"], "error": state["error"]}
+            return self.send_json(data)
         if path == "/api/report":
             purge_expired()
+            # Disk checks and sending happen outside the lock, so one slow request can't stall the others.
+            ttl_days, access, admin_used = get_ttl_days(), scanners.full_disk_access(), read_json(SETTINGS_FILE, {}).get("admin_last_used")
             with state_lock:
-                return self.send_json({"report": state["report"], "technical": state["tech"], "system": state["system_tech"],
-                                       "technical_expires_at": state["tech_expires"], "ttl_days": get_ttl_days(),
-                                       "ttl_choices": TTL_CHOICES, "actionable": list(state["actionable"].keys()),
-                                       "revealable": list(state["revealable"].keys()),
-                                       "system_items": list(state["system_items"].keys()), "brew_ready": list(state["brew_ids"]), "reinstall_ready": list(state["reinstall"].keys()),
-                                       "admin_network": state["admin_network"], "app_path": os.environ.get("MAC_HEALTH_APP"),
-                                       "full_disk_access": scanners.full_disk_access(),
-                                       "admin_last_used": read_json(SETTINGS_FILE, {}).get("admin_last_used")})
+                data = {"report": state["report"], "technical": state["tech"], "system": state["system_tech"],
+                        "technical_expires_at": state["tech_expires"], "ttl_days": ttl_days,
+                        "ttl_choices": TTL_CHOICES, "actionable": list(state["actionable"].keys()),
+                        "revealable": list(state["revealable"].keys()),
+                        "system_items": list(state["system_items"].keys()), "brew_ready": list(state["brew_ids"]), "reinstall_ready": list(state["reinstall"].keys()),
+                        "admin_network": state["admin_network"], "app_path": os.environ.get("MAC_HEALTH_APP"),
+                        "full_disk_access": access, "admin_last_used": admin_used}
+                body = to_json(data).encode("utf-8")
+            return self.send_body(200, body)
         if path == "/api/history":
             return self.send_json({"history": read_jsonl(HISTORY_FILE), "retention_days": HISTORY_RETENTION_DAYS})
         if path == "/api/job":
             with state_lock:
-                return self.send_json(state["job"])
+                data = dict(state["job"])
+            return self.send_json(data)
         self.send_json({"error": "Not found."}, 404)
 
     def read_body(self):
@@ -767,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
             if length < 0 or length > 2 * 1024 * 1024:
                 return None
             return json.loads(self.rfile.read(length) or b"{}")
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
 
     def do_POST(self):
@@ -789,16 +947,16 @@ class Handler(BaseHTTPRequestHandler):
             ids = body.get("ids")
             if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
                 return self.send_json({"error": "Nothing selected."}, 400)
-            return self.exclusive(trash_items, ids)
+            return self.exclusive(trash_items, ids, body.get("confirm_personal") is True)
         if self.path == "/api/reveal":
             with state_lock:
-                path = state["revealable"].get(body.get("id"))
+                path = state["revealable"].get(str(body.get("id")))
             if not path or not os.path.exists(path):
                 return self.send_json({"error": "This item is no longer there. Scan again."}, 404)
             scanners.run(["/usr/bin/open", "-R", path], timeout=10)
             return self.send_json({"ok": True})
         if self.path == "/api/open-settings":
-            url = SETTINGS_PANES.get(body.get("pane"))
+            url = SETTINGS_PANES.get(str(body.get("pane")))
             if not url:
                 return self.send_json({"error": "Unknown settings page."}, 400)
             scanners.run(["/usr/bin/open", url], timeout=10)
@@ -816,7 +974,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.exclusive(admin_network_check)
         if self.path == "/api/brew-upgrade":
             with state_lock:
-                if not state["brew_ids"]:  # saved results stay read-only until a new scan
+                old = not state["scanned_at"] or time.time() - state["scanned_at"] > SCAN_VALID_SECONDS
+                if old or not state["brew_ids"]:  # saved results stay read-only until a new scan
                     return self.send_json({"error": "Scan again, then retry."}, 409)
                 if state["job"]["running"]:
                     return self.send_json({"error": "An update is already running."}, 409)
@@ -831,8 +990,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/brew-reinstall":
             return self.exclusive(brew_reinstall_in_terminal, str(body.get("id")))
         if self.path == "/api/brew-terminal":
-            data, code = brew_finish_in_terminal()
-            return self.send_json(data, code)
+            return self.exclusive(brew_finish_in_terminal)
         if self.path == "/api/settings":
             days = body.get("technical_ttl_days")
             if days not in TTL_CHOICES:
@@ -859,7 +1017,10 @@ class Handler(BaseHTTPRequestHandler):
 def housekeeping():
     while True:
         time.sleep(600)
-        purge_expired()
+        try:
+            purge_expired()
+        except Exception:
+            pass
 
 
 def exit_when_app_closes():
@@ -880,16 +1041,18 @@ def main():
         print("Open Mac Health.app to start Mac Health.", file=sys.stderr)
         sys.exit(1)
     os.umask(0o077)
-    os.makedirs(TECH_DIR, mode=0o700, exist_ok=True)
-    os.makedirs(REMOVED_DIR, mode=0o700, exist_ok=True)
-    os.chmod(DATA_DIR, 0o700)
+    secure_data_folders()
     os.nice(10)  # scans run behind whatever you're doing
     try:
         os.remove(os.path.join(DATA_DIR, "server.json"))  # from older versions, which stored the token
     except OSError:
         pass
-    purge_expired()
-    load_saved()
+    try:
+        scanners.clear_leftover_jobs()
+        purge_expired()
+        load_saved()
+    except Exception:  # damaged saved data must never stop the app from opening
+        state["report"] = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     PORT = server.server_address[1]
     threading.Thread(target=housekeeping, daemon=True).start()
