@@ -31,6 +31,9 @@ SKIP_HOME_DIRS = {"Library", "Applications"}  # only in the home folder itself: 
 DNS_ID = re.compile(r"^(com|org|net|io|ai|co|de|app|dev|me|us|uk|jp|cn|ru|fr|tv|info)\.[\w-]+\.", re.I)
 SUSPICIOUS_DIRS = ("/tmp/", "/private/tmp/", "/var/tmp/", "/Users/Shared/", os.path.join(HOME, "Downloads") + "/")
 SCRIPT_RUNNERS = {"bash", "sh", "zsh", "python", "python3", "perl", "ruby", "osascript", "curl", "node"}
+# Hidden folders that common installers use for command-line tools, so a program there isn't unusual.
+TOOL_DIRS = tuple(os.path.join(HOME, d) + "/" for d in (
+    ".local/bin", ".cargo/bin", ".nvm", ".bun/bin", ".deno/bin", ".volta/bin", ".npm-global/bin"))
 # Plain-named Application Support folders that macOS or common tools own.
 KNOWN_SUPPORT_NAMES = {
     "addressbook", "callhistorydb", "callhistorytransactions", "cloudDocs".lower(), "crashreporter", "dock",
@@ -544,86 +547,132 @@ def launchd_state(label):
     return {"loaded": False}
 
 
+def real_command(program, args):
+    """See past env and nohup, which only start another program, to the one that actually runs."""
+    rest = [a for a in args[1:] if isinstance(a, str)]  # a malformed entry mustn't stop the check
+    while os.path.basename(program) in ("env", "nohup") and rest:
+        if os.path.basename(program) == "env":
+            while rest and (rest[0].startswith("-") or "=" in rest[0]):
+                flag = rest.pop(0)
+                if flag == "-S" and rest:
+                    rest = rest.pop(0).split() + rest  # -S holds the command as one string
+                elif flag in ("-u", "-P", "-C") and rest:
+                    rest.pop(0)  # these options take the next word as their value
+                if flag == "--":
+                    break
+        if not rest:
+            break
+        program, rest = rest[0], rest[1:]
+    return program, rest
+
+
+def hidden_location(path):
+    """A hidden folder is unusual for a startup program, unless it's a known tool folder."""
+    for folder in TOOL_DIRS:
+        if path.startswith(folder):
+            path = path[len(folder) - 1:]  # still flag a hidden folder inside the tool folder
+            break
+    return "/." in path
+
+
 def scan_launch_items(apps):
     results = []
     installed_bundles = {os.path.basename(a["path"]).lower() for a in apps}
     vendors = {vendor_of(a["bundle_id"]) for a in apps if a["bundle_id"]}
     orphans, helper_keys = {}, set()
     roots = [(os.path.join(LIB, "LaunchAgents"), True), ("/Library/LaunchAgents", False), ("/Library/LaunchDaemons", False)]
-    for root, user_owned in roots:
-        try:
-            names = sorted(os.listdir(root))
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".plist"):
-                continue
-            path = os.path.join(root, name)
+
+    def classify(path, label, program, args, data, user_owned):
+        real, rest = real_command(program, args)
+        expanded = os.path.expanduser(real)
+        system_program = expanded.startswith(("/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", "/System/"))
+        sig = None if system_program or not expanded.startswith("/") else signature_info(expanded)
+        tech = {"path": path, "label": label, "program": program, "arguments": args[:8], "signature": sig,
+                "run_at_load": data.get("RunAtLoad"), "keep_alive": data.get("KeepAlive")}
+        hint = None if user_owned else "This is a system-level file, so use the developer's uninstaller if you no longer want it."
+        base = os.path.basename(real)
+        places = [os.path.expanduser(program), expanded]
+        # A shell's -c command names the program it runs, so check where that lives too.
+        if base in ("sh", "bash", "zsh") and len(rest) > 1 and rest[0] == "-c" and isinstance(rest[1], str) and rest[1].split():
+            places.append(os.path.expanduser(rest[1].split()[0]))
+        unusual = [p for p in places if isinstance(p, str) and (p.startswith(SUSPICIOUS_DIRS) or hidden_location(p))]
+        if unusual:
+            return item("alerts", "Startup item runs from an unusual location: %s" % label,
+                        "It starts automatically from %s. Legitimate software rarely runs from there, so check that you recognise it." % pretty_path(os.path.dirname(unusual[0])),
+                        "high", "medium", paths=[path], trashable=user_owned, technical=tech,
+                        action=hint or "Search for the name online. Remove it if you can't identify it.")
+        if base in SCRIPT_RUNNERS:
+            return item("alerts", "Startup item runs a script: %s" % label,
+                        "A script runs automatically through %s. Many tools do this, but malware does too, so it's worth checking that you recognise it." % base,
+                        "medium", "low", paths=[path], trashable=user_owned, technical=tech,
+                        action=hint or "Open the technical details to see the command it runs.")
+        if sig and sig["status"] == "unsigned":
+            return item("alerts", "Startup item with no developer signature: %s" % label,
+                        "A program that starts automatically doesn't have a developer signature. Homebrew and other open-source tools often look like this.",
+                        "medium", "low", paths=[path], trashable=user_owned, technical=tech,
+                        action=hint or "Keep it if you recognise the tool. Otherwise, remove it.")
+        return None
+
+    # Each codesign and launchctl call can take seconds, so they run alongside each other; results keep file order.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for root, user_owned in roots:
             try:
-                with open(path, "rb") as handle:
-                    data = plistlib.load(handle)
-            except Exception:
-                results.append(item("alerts", "Unreadable startup item: %s" % name,
-                                    "This startup file can't be read, so it may be damaged.", "low", "medium",
-                                    paths=[path], trashable=user_owned, technical={"path": path}))
+                names = sorted(os.listdir(root))
+            except OSError:
                 continue
-            args = data.get("ProgramArguments") if isinstance(data, dict) else None
-            args = args if isinstance(args, list) else []
-            program = (data.get("Program") or (args[0] if args else None)) if isinstance(data, dict) else 0
-            label = data.get("Label", name[:-6]) if isinstance(data, dict) else name[:-6]
-            # A malformed file must not stop the files after it from being checked.
-            if (program and not isinstance(program, str)) or not isinstance(label, str) or not isinstance(data, dict):
-                results.append(item("alerts", "Malformed startup item: %s" % name,
-                                    "This startup file doesn't have the structure macOS expects, which is unusual, so check that you recognise it.", "medium", "medium",
-                                    paths=[path], trashable=user_owned, technical={"path": path}))
-                continue
-            if not program:
-                # Nothing to diagnose: macOS or the vendor resolves these in its own way, so stay out.
-                continue
-            expanded = os.path.expanduser(program)
-            # launchd finds bare names on its own path, and an unplugged drive doesn't mean an app is gone.
-            if expanded.startswith("/") and not expanded.startswith("/Volumes/") and not os.path.exists(expanded):
-                bundle = re.search(r"/([^/]+\.app)/", program + "/")
-                app_name = bundle.group(1) if bundle else None
-                if app_name and app_name.lower() in installed_bundles:
-                    continue  # the app moved but still exists, so it isn't a leftover
-                key = app_name or label
-                orphans.setdefault(key, []).append({"path": path, "label": label, "program": program,
-                                                    "user_owned": user_owned, "launchd": launchd_state(label)})
-                continue
-            owners = data.get("AssociatedBundleIdentifiers") or []
-            owners = [owners] if isinstance(owners, str) else owners
-            owned_by_installed = any(isinstance(o, str) and vendor_of(o) in vendors for o in owners) if isinstance(owners, list) else False
-            # Only a root-owned file can claim a root helper. Otherwise any program could aim the admin prompt at one.
-            if not user_owned and program.startswith("/Library/PrivilegedHelperTools/") and vendor_of(label) not in vendors and not owned_by_installed:
-                state = launchd_state(label)
-                key = label.split(".")[1] if "." in label else label
-                helper_keys.add(key)  # a vendor match is weaker evidence than a missing program
-                orphans.setdefault(key, []).extend([
-                    {"path": path, "label": label, "program": program, "user_owned": False, "launchd": state},
-                    {"path": program, "label": None, "program": program, "user_owned": False, "launchd": state}])
-                continue
-            system_program = program.startswith(("/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", "/System/"))
-            sig = None if system_program or not expanded.startswith("/") else signature_info(expanded)
-            tech = {"path": path, "label": label, "program": program, "arguments": args[:8], "signature": sig,
-                    "run_at_load": data.get("RunAtLoad"), "keep_alive": data.get("KeepAlive")}
-            hint = None if user_owned else "This is a system-level file, so use the developer's uninstaller if you no longer want it."
-            base = os.path.basename(program)
-            if program.startswith(SUSPICIOUS_DIRS) or "/." in program:
-                results.append(item("alerts", "Startup item runs from an unusual location: %s" % label,
-                                    "It starts automatically from %s. Legitimate software rarely runs from there, so check that you recognise it." % pretty_path(os.path.dirname(program)),
-                                    "high", "medium", paths=[path], trashable=user_owned, technical=tech,
-                                    action=hint or "Search for the name online. Remove it if you can't identify it."))
-            elif base in SCRIPT_RUNNERS:
-                results.append(item("alerts", "Startup item runs a script: %s" % label,
-                                    "A script runs automatically through %s. Many tools do this, but malware does too, so it's worth checking that you recognise it." % base,
-                                    "medium", "low", paths=[path], trashable=user_owned, technical=tech,
-                                    action=hint or "Open the technical details to see the command it runs."))
-            elif sig and sig["status"] == "unsigned":
-                results.append(item("alerts", "Startup item with no developer signature: %s" % label,
-                                    "A program that starts automatically doesn't have a developer signature. Homebrew and other open-source tools often look like this.",
-                                    "medium", "low", paths=[path], trashable=user_owned, technical=tech,
-                                    action=hint or "Keep it if you recognise the tool. Otherwise, remove it."))
+            for name in names:
+                if not name.endswith(".plist"):
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    with open(path, "rb") as handle:
+                        data = plistlib.load(handle)
+                except Exception:
+                    results.append(item("alerts", "Unreadable startup item: %s" % name,
+                                        "This startup file can't be read, so it may be damaged.", "low", "medium",
+                                        paths=[path], trashable=user_owned, technical={"path": path}))
+                    continue
+                args = data.get("ProgramArguments") if isinstance(data, dict) else None
+                args = args if isinstance(args, list) else []
+                program = (data.get("Program") or (args[0] if args else None)) if isinstance(data, dict) else 0
+                label = data.get("Label", name[:-6]) if isinstance(data, dict) else name[:-6]
+                # A malformed file must not stop the files after it from being checked.
+                if (program and not isinstance(program, str)) or not isinstance(label, str) or not isinstance(data, dict):
+                    results.append(item("alerts", "Malformed startup item: %s" % name,
+                                        "This startup file doesn't have the structure macOS expects, which is unusual, so check that you recognise it.", "medium", "medium",
+                                        paths=[path], trashable=user_owned, technical={"path": path}))
+                    continue
+                if not program:
+                    # Nothing to diagnose: macOS or the vendor resolves these in its own way, so stay out.
+                    continue
+                expanded = os.path.expanduser(program)
+                # launchd finds bare names on its own path, and an unplugged drive doesn't mean an app is gone.
+                if expanded.startswith("/") and not expanded.startswith("/Volumes/") and not os.path.exists(expanded):
+                    bundle = re.search(r"/([^/]+\.app)/", program + "/")
+                    app_name = bundle.group(1) if bundle else None
+                    if app_name and app_name.lower() in installed_bundles:
+                        continue  # the app moved but still exists, so it isn't a leftover
+                    key = app_name or label
+                    orphans.setdefault(key, []).append({"path": path, "label": label, "program": program,
+                                                        "user_owned": user_owned, "launchd": pool.submit(launchd_state, label)})
+                    continue
+                owners = data.get("AssociatedBundleIdentifiers") or []
+                owners = [owners] if isinstance(owners, str) else owners
+                owned_by_installed = any(isinstance(o, str) and vendor_of(o) in vendors for o in owners) if isinstance(owners, list) else False
+                # Only a root-owned file can claim a root helper. Otherwise any program could aim the admin prompt at one.
+                if not user_owned and program.startswith("/Library/PrivilegedHelperTools/") and vendor_of(label) not in vendors and not owned_by_installed:
+                    state = pool.submit(launchd_state, label)
+                    key = label.split(".")[1] if "." in label else label
+                    helper_keys.add(key)  # a vendor match is weaker evidence than a missing program
+                    orphans.setdefault(key, []).extend([
+                        {"path": path, "label": label, "program": program, "user_owned": False, "launchd": state},
+                        {"path": program, "label": None, "program": program, "user_owned": False, "launchd": state}])
+                    continue
+                results.append(pool.submit(classify, path, label, program, args, data, user_owned))
+        results = [r for r in (r if isinstance(r, dict) else r.result() for r in results) if r]
+        for entries in orphans.values():
+            for entry in entries:
+                entry["launchd"] = entry["launchd"].result()
 
     for key, entries in sorted(orphans.items()):
         name = key[:-4] if key.endswith(".app") else key
@@ -821,7 +870,23 @@ def can_modify(folder):
         return False
 
 
+def apps_on_external_drives(apps):
+    """True if apps are known to live on a drive under /Volumes, plugged in now or kept in the Dock."""
+    if any(a["path"].startswith("/Volumes/") for a in apps):
+        return True
+    # Spotlight can't see an unplugged drive, but the Dock still remembers apps kept there. It's one small file.
+    try:
+        with open(os.path.join(LIB, "Preferences", "com.apple.dock.plist"), "rb") as handle:
+            tiles = plistlib.load(handle).get("persistent-apps") or []
+        urls = [t["tile-data"]["file-data"]["_CFURLString"] for t in tiles
+                if isinstance(t, dict) and isinstance(t.get("tile-data"), dict) and isinstance(t["tile-data"].get("file-data"), dict)]
+    except Exception:
+        return False
+    return any(isinstance(u, str) and (u.startswith("file:///Volumes/") or u.startswith("/Volumes/")) for u in urls)
+
+
 def scan_leftovers(apps, coverage):
+    external = apps_on_external_drives(apps)
     installed = {a["bundle_id"].lower() for a in apps if a["bundle_id"]}
     vendors = {vendor_of(b) for b in installed}
     app_names = {norm(a["name"]) for a in apps}
@@ -899,13 +964,16 @@ def scan_leftovers(apps, coverage):
         if group["plain_name"]:
             confidence = "uncertain"
         else:
-            confidence = "very likely" if newest >= 90 else "likely"
+            # An app on an unplugged drive looks uninstalled, so don't be more sure than "likely".
+            confidence = "very likely" if newest >= 90 and not external else "likely"
         display = group["name"].split(".")[-1] if not group["plain_name"] else group["name"]
         count = len(group["paths"])
         plain = "No installed app or running tool matches this name. It was last changed %d days ago and has %d item%s using %s." % (
             newest, count, "" if count == 1 else "s", fmt_size(size))
         if confidence == "uncertain":
             plain += " The folder name is generic, so check it before removing it."
+        elif external:
+            plain += " You keep apps on an external drive, so this app may be on one that isn't plugged in."
         movable = [p for p in group["paths"] if not p.startswith(locked_roots)] if locked_roots else group["paths"]
         locked = [p for p in group["paths"] if p not in movable]
         action = "This may be saved data, not just settings. Check the folder first, especially if the app is on an unplugged drive."
@@ -1382,7 +1450,7 @@ def scan_network(firewall_on):
 
 # ---------- Score and tips ----------
 
-def build_score(cards, sections):
+def build_score(cards, sections, coverage=None):
     deductions = []
 
     def deduct(points, reason):
@@ -1422,6 +1490,13 @@ def build_score(cards, sections):
         deduct(min(15, high * 5), "%d high-priority alert%s" % (high, "" if high == 1 else "s"))
     if medium:
         deduct(min(10, medium * 2), "%d medium-priority alert%s" % (medium, "" if medium == 1 else "s"))
+    # An unfinished check must not read as healthy. Folders blocked by Full Disk Access share one cause,
+    # so they count once, and the "fda" partial notes are about removing data, not about reading it.
+    coverage = coverage or []
+    unfinished = sum(1 for c in coverage if c.get("status") in ("failed", "partial") and c.get("fix") != "fda")
+    unfinished += 1 if any(c.get("status") == "blocked" for c in coverage) else 0
+    if unfinished:
+        deduct(min(10, unfinished * 2), "%d check%s didn't finish" % (unfinished, "" if unfinished == 1 else "s"))
     return max(0, 100 - sum(d["points"] for d in deductions)), deductions
 
 
@@ -1597,7 +1672,7 @@ def full_scan(progress=lambda stage, pct: None, last_scan=None):
         coverage.append({"area": "Startup list", "status": "failed", "fix": "rescan", "note": "macOS didn't return the list in time."})
     cards["updates"] = updates.result()
     updates_pool.shutdown()
-    score, deductions = build_score(cards, sections)
+    score, deductions = build_score(cards, sections, coverage)
     tips = build_tips(cards, sections)
     return {
         "generated_at": time.time(),

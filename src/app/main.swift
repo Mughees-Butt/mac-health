@@ -24,8 +24,11 @@ private let scanRequest = Notification.Name("local.machealth.scan-request")
 
 // Encrypts saved results. The item trusts only this app, so macOS asks you before any other program reads it.
 // An item that's open to every program, isn't in the expected format or wasn't made for this app is replaced,
-// because another program could have planted it to know the key. One planted with this app as its only
-// trusted program before Mac Health first ran can't be told apart.
+// because another program could have planted it to know the key. Only the login keychain is used, because
+// any program can put another keychain ahead of it in the search list without a prompt.
+// This is not complete protection: a program running as you can delete the item and plant one that trusts
+// only this app, without a prompt and at any time, and that can't be told apart. Closing that needs the
+// data-protection keychain, which needs an Apple team ID this locally signed app doesn't have.
 private let dataKeyQuery: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                            kSecAttrService as String: "local.machealth.data-key",
                                            kSecAttrAccount as String: "saved-results"]
@@ -58,7 +61,12 @@ private func onlyThisAppMayRead(_ item: SecKeychainItem) -> Bool {
 }
 
 private func savedDataKey() -> String? {
-    var query = dataKeyQuery
+    var keychain: SecKeychain?
+    let path = NSHomeDirectory() + "/Library/Keychains/login.keychain-db"
+    guard SecKeychainOpen(path, &keychain) == errSecSuccess, let keychain = keychain else { return nil }
+    var inLogin = dataKeyQuery
+    inLogin[kSecMatchSearchList as String] = [keychain]
+    var query = inLogin
     query[kSecReturnData as String] = true
     query[kSecReturnRef as String] = true
     var found: CFTypeRef?
@@ -67,7 +75,7 @@ private func savedDataKey() -> String? {
         let key = String(decoding: data, as: UTF8.self)
         let wellFormed = key.count == 64 && key.allSatisfy { "0123456789abcdef".contains($0) }
         if wellFormed, let ref = result[kSecValueRef as String], onlyThisAppMayRead(ref as! SecKeychainItem) { return key }
-        guard SecItemDelete(dataKeyQuery as CFDictionary) == errSecSuccess else { return nil }
+        guard SecItemDelete(inLogin as CFDictionary) == errSecSuccess else { return nil }
     } else if status != errSecItemNotFound {
         return nil
     }
@@ -80,6 +88,7 @@ private func savedDataKey() -> String? {
     item[kSecAttrLabel as String] = "Mac Health saved results"
     item[kSecValueData as String] = Data(key.utf8)
     item[kSecAttrAccess as String] = access
+    item[kSecUseKeychain as String] = keychain
     return SecItemAdd(item as CFDictionary, nil) == errSecSuccess ? key : nil
 }
 
@@ -90,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var origin = ""
     private var webView: WKWebView?
     private var scanWhenLoaded = CommandLine.arguments.contains("--scan")
+    private var loaded = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -231,6 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        loaded = true
         if scanWhenLoaded {
             scanWhenLoaded = false
             startScan()
@@ -238,7 +249,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func startScan() {
-        webView?.evaluateJavaScript("view.tab = 'overview'; startScan().catch(() => {}); void 0", completionHandler: nil)
+        // A request that arrives while the window is still loading would otherwise be lost.
+        guard loaded, let webView = webView else {
+            scanWhenLoaded = true
+            return
+        }
+        webView.evaluateJavaScript("view.tab = 'overview'; startScan().catch(() => {}); void 0", completionHandler: nil)
     }
 
     // Only the local dashboard may load in this window.

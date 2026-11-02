@@ -213,7 +213,8 @@ def read_jsonl(path):
         with open_private(path) as handle:
             for line in handle:
                 line = line.strip()
-                if path == ACTIONS_FILE and line.startswith(SEALED_MARK):
+                # Any program running as you can append a plain line, so only rows this app sealed count.
+                if path == ACTIONS_FILE:
                     line = unseal(line, "actions") or ""
                 try:
                     row = json.loads(line, parse_constant=reject_constant, parse_float=finite_float)
@@ -244,14 +245,7 @@ def prune_jsonl(path, retention_days):
     with storage_lock:
         rows = read_jsonl(path)
         kept = [r for r in rows if r.get("t", 0) >= cutoff]
-        unsealed = False
-        if path == ACTIONS_FILE:
-            try:
-                with open_private(path) as handle:
-                    unsealed = any(line.strip() and not line.startswith(SEALED_MARK) for line in handle)
-            except (OSError, ValueError):
-                pass
-        if (len(kept) != len(rows) or unsealed) and may_write(path):
+        if len(kept) != len(rows) and may_write(path):
             write_private(path, "".join(encode_row(path, r) + "\n" for r in kept))
 
 
@@ -399,14 +393,16 @@ def secure_data_folders():
 
 
 def set_setting(key, value):
-    settings = read_json(SETTINGS_FILE, {})
-    settings[key] = value
-    write_private(SETTINGS_FILE, to_json(settings))
+    # One lock around read and write, so two saves at once can't each drop the other's change.
+    with storage_lock:
+        settings = read_json(SETTINGS_FILE, {})
+        settings[key] = value
+        write_private(SETTINGS_FILE, to_json(settings))
 
 
 def recalculate(report):
     """Keep the score and next steps true after every action, without a full scan. Caller holds the lock."""
-    report["score"], report["deductions"] = scanners.build_score(report["cards"], report["sections"])
+    report["score"], report["deductions"] = scanners.build_score(report["cards"], report["sections"], report.get("coverage"))
     report["tips"] = scanners.build_tips(report["cards"], report["sections"])
     stamp_first_seen(report["tips"])
     write_sealed(PLAIN_FILE, report, "report")
@@ -470,7 +466,8 @@ def do_scan():
                 if entry.get("fix") and entry["fix"]["kind"] == "admin_remove":
                     system_items[entry["id"]] = {"system": tech[entry["id"]]["system_items"], "user": tech[entry["id"]].get("user_items", [])}
                 if tech[entry["id"]].get("reinstall"):
-                    reinstall[entry["id"]] = tech[entry["id"]]["reinstall"]
+                    # The app's path is kept too, so the reinstall can check it isn't running.
+                    reinstall[entry["id"]] = dict(tech[entry["id"]]["reinstall"], path=tech[entry["id"]].get("path"))
                 add_check_command(entry, tech[entry["id"]])
                 if entry["category"] == "developer" and ("package" in tech[entry["id"]] or (entry.get("fix") or {}).get("kind") == "brew"):
                     brew_ids.add(entry["id"])
@@ -729,9 +726,13 @@ def remove_system_item(item_id):
             confirmed = False
         if not confirmed:
             return {"error": "macOS didn't confirm this change, so scan again to check."}, 400
+        # mv -n keeps each name, so the log can say where the item was, not the temporary folder.
+        original = {}
+        for entry in entries:
+            original.setdefault(os.path.basename(entry["path"]), entry["path"])
         for name in os.listdir(hold):
             path = os.path.join(hold, name)
-            append_jsonl(ACTIONS_FILE, {"t": time.time(), "action": "removed_system_item", "path": path})
+            append_jsonl(ACTIONS_FILE, {"t": time.time(), "action": "removed_system_item", "path": original.get(name, path)})
             if move_to_trash(path):
                 # Temporary folders get cleared, so keep anything Trash refused somewhere it will last.
                 kept = tempfile.mkdtemp(dir=REMOVED_DIR)
@@ -939,8 +940,19 @@ def brew_reinstall_in_terminal(item_id):
     with state_lock:
         cask = state["reinstall"].get(item_id)
     brew = find_brew()
-    if not brew or not cask or not scanners.re.fullmatch(PACKAGE_NAME, cask["token"]):
+    app = (cask or {}).get("path")
+    valid_app = isinstance(app, str) and os.path.isabs(app) and os.path.normpath(app) == app and app.endswith(".app")
+    if not brew or not cask or not valid_app or not scanners.re.fullmatch(PACKAGE_NAME, cask["token"]):
         return {"error": "This can't be reinstalled from here. Scan again."}, 400
+    # Replacing a running app can break it, so check rather than trust the advice to quit it. pgrep reads a pattern,
+    # so the path's special characters are escaped, and only programs inside this app's bundle match.
+    pattern = "^" + scanners.re.sub(r"([.\[\](){}*+?|^$\\])", r"\\\1", app) + "/Contents/MacOS/"
+    code, _ = scanners.run(["/usr/bin/pgrep", "-f", pattern], timeout=10)
+    name = os.path.basename(app)[:-4]
+    if code == 0:
+        return {"error": "Quit %s first, then try again." % name}, 409
+    if code != 1:  # 1 means nothing matched; anything else means it couldn't be checked
+        return {"error": "Couldn't check whether %s is running, so nothing was started. Try again." % name}, 409
     # An app that didn't come from Homebrew has to be replaced, which is what --force is for.
     verb = "reinstall --cask" if cask["installed"] else "install --cask --force"
     open_terminal_script(["%s %s %s" % (shlex.quote(brew), verb, shlex.quote(cask["token"]))])

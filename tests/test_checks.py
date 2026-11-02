@@ -156,8 +156,10 @@ class Actions(unittest.TestCase):
         server.state.update(reinstall={}, brew_ids=set(), tech={}, system_items={}, acting=False, scanning=False, scanned_at=time.time())
 
     def test_reinstall_uses_force_only_for_apps_outside_homebrew(self):
-        server.state["reinstall"]["a"] = {"token": "clipy", "installed": False}
-        server.state["reinstall"]["b"] = {"token": "clipy", "installed": True}
+        server.state["reinstall"]["a"] = {"token": "clipy", "installed": False, "path": "/Applications/Clipy.app"}
+        server.state["reinstall"]["b"] = {"token": "clipy", "installed": True, "path": "/Applications/Clipy.app"}
+        self.addCleanup(setattr, scanners, "run", scanners.run)
+        scanners.run = lambda cmd, **k: (1, "")  # not running
         server.brew_reinstall_in_terminal("a")
         server.brew_reinstall_in_terminal("b")
         self.assertIn("install --cask --force clipy", self.commands[0][0])
@@ -377,18 +379,15 @@ class Sealing(unittest.TestCase):
         server.DATA_KEY = b"another key"
         self.assertIsNone(server.unseal(sealed, "report"))
 
-    def test_action_log_is_sealed_and_old_rows_convert(self):
+    def test_action_log_is_sealed_and_plain_rows_are_ignored(self):
         self.addCleanup(setattr, server, "ACTIONS_FILE", server.ACTIONS_FILE)
         server.ACTIONS_FILE = os.path.join(self.folder, "actions.jsonl")
         now = time.time()
         with open(server.ACTIONS_FILE, "w") as handle:
-            handle.write(json.dumps({"t": now, "path": "/old/Secret.mov"}) + "\n")
+            handle.write(json.dumps({"t": now, "path": "/forged/Secret.mov"}) + "\n")
         server.append_jsonl(server.ACTIONS_FILE, {"t": now, "path": "/new/Secret.mov"})
-        self.assertEqual(len(server.read_jsonl(server.ACTIONS_FILE)), 2)
-        server.prune_jsonl(server.ACTIONS_FILE, 30)
-        with open(server.ACTIONS_FILE) as handle:
-            self.assertNotIn("Secret", handle.read())
-        self.assertEqual(len(server.read_jsonl(server.ACTIONS_FILE)), 2)
+        rows = server.read_jsonl(server.ACTIONS_FILE)
+        self.assertEqual([r["path"] for r in rows], ["/new/Secret.mov"])
 
     def test_plain_saved_results_are_removed(self):
         self.addCleanup(setattr, server, "PLAIN_FILE", server.PLAIN_FILE)

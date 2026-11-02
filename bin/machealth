@@ -9,7 +9,7 @@ case "${1:-}" in
   --no-scan) SCAN=0 ;;
   -h|--help)
     print "Usage: machealth [--no-scan]"
-    print "Opens Mac Health and starts a scan. Results appear in its window."
+    print "Opens Mac Health and asks it to start a scan. Progress and results appear in its window."
     print "  --no-scan   Open it with your saved results, without scanning."
     exit 0 ;;
   *) print -u2 "Unknown option: $1. Try machealth --help."; exit 2 ;;
@@ -29,4 +29,9 @@ else
   /usr/bin/open "$APP" || exit 1
 fi
 
-if [ "$SCAN" = 1 ]; then print "Mac Health is open and scanning."; else print "Mac Health is open."; fi
+# This script can't see whether the scan started: the app may be busy with another action or still loading.
+if [ "$SCAN" = 1 ]; then
+  print "Mac Health is open. A scan was requested; progress shows in its window."
+else
+  print "Mac Health is open."
+fi

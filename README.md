@@ -84,7 +84,7 @@ Python must stay 3.9 compatible with no third-party packages, because the app ru
 ## Tests
 
 ```bash
-/usr/bin/python3 -B tests/test_checks.py
+for t in tests/test_*.py; do /usr/bin/python3 -B "$t" || break; done
 ```
 
 The tests use a temporary home folder and a fake `brew`, so they don't touch your results or change your Mac.

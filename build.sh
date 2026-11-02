@@ -51,5 +51,7 @@ rm -rf "$APP"
 mv "$NEW" "$APP"
 echo "Built $APP"
 if pgrep -x MacHealth >/dev/null; then
-  echo "The old copy is still running. Quit it before opening the new one."
+  # Nothing is quit for you, so a scan or clean-up in progress isn't cut off.
+  echo "The old copy of Mac Health is still running, so machealth and the Dock would keep opening it, not the new build."
+  echo "To use the new build, quit Mac Health (Mac Health > Quit Mac Health), then open it again."
 fi
