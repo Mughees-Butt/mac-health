@@ -34,7 +34,7 @@ fi
 
 if [ -f .signing-identity ]; then ok "Signing key"
 elif /usr/bin/security find-certificate -c "Mac Health Local Signing" >/dev/null 2>&1; then
-  missing "A key named Mac Health Local Signing exists that this setup didn't record. If you made it with an older Mac Health, run ./scripts/setup-signing.sh --adopt"
+  missing "A key named Mac Health Local Signing exists that this setup didn't make. Run ./scripts/setup-signing.sh to see how to replace it"
   problems=1
 else print "  • Signing key: will be created"; fi
 if [ -d "Mac Health.app" ]; then print "  • App: will be rebuilt"; else print "  • App: will be built"; fi

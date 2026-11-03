@@ -213,6 +213,9 @@ class RescanFindings(unittest.TestCase):
         self.assertFalse(scanners.protected_by_root(mine))
         self.assertTrue(scanners.protected_by_root("/bin/sh"))
         self.assertFalse(scanners.protected_by_root(os.path.join(folder, "missing")))
+        link = os.path.join(folder, "link")
+        os.symlink("/bin/sh", link)  # points at a root file, but a link is never trusted
+        self.assertFalse(scanners.protected_by_root(link))
 
     def test_admin_removal_refuses_a_file_your_account_owns(self):
         folder = os.path.realpath(tempfile.mkdtemp())

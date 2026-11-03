@@ -14,7 +14,7 @@ cd "${0:A:h}"
 APP="Mac Health.app"
 # Only the exact key setup-signing.sh created and recorded, so a key with the same name made by anything else is never used.
 if [ ! -f .signing-identity ]; then
-  echo "No recorded signing key. Run ./scripts/setup-signing.sh, or --adopt if you made the key with an older Mac Health." >&2
+  echo "No recorded signing key. Run ./scripts/setup-signing.sh first." >&2
   exit 1
 fi
 IDENTITY="$(/bin/cat .signing-identity)"

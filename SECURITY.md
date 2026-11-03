@@ -16,5 +16,5 @@ Please report problems privately through this repository's **Security** tab, usi
 
 These are described in the README and aren't treated as vulnerabilities:
 - Programs running as you can read your ordinary files, and see file paths in the process list during a scan
-- A program running as you can change the source before you build it, or replace the encryption key item with one trusting only Mac Health. If your saved results then can't be opened, the Access page says the key changed.
+- A program running as you can change the source before you build it, or replace the encryption key item with one trusting only Mac Health. The Access page says when the key changes, but a program that also clears what Mac Health remembers about earlier keys can avoid that notice.
 - Someone could trick you into approving a macOS prompt

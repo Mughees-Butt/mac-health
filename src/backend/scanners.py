@@ -243,7 +243,8 @@ def protected_by_root(path):
         info = os.lstat(path)
     except OSError:
         return False
-    return info.st_uid == 0 and not info.st_mode & 0o022
+    # A link is refused too: root may own it, but whatever it points at could be yours.
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == 0 and not info.st_mode & 0o022
 
 
 def real_folder(path):
@@ -641,7 +642,12 @@ def scan_launch_items(apps):
                                         action="Check that you recognise it. Mac Health won't remove it, because it can't trust what it says."))
                     continue
                 try:
-                    with open(path, "rb") as handle:
+                    # Read the exact file that was checked: not following links, and checking it again once open.
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(fd, "rb") as handle:
+                        opened = os.fstat(handle.fileno())
+                        if not user_owned and (opened.st_uid != 0 or opened.st_mode & 0o022 or opened.st_nlink != 1 or not stat.S_ISREG(opened.st_mode)):
+                            raise OSError("changed while being read")
                         data = plistlib.load(handle)
                 except Exception:
                     results.append(item("alerts", "Unreadable startup item: %s" % name,

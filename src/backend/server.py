@@ -82,12 +82,15 @@ SETTINGS_PANES = {
 TRASH_SCRIPT = """
 function run(argv) {
   ObjC.import('Foundation');
-  const url = $.NSURL.fileURLWithPath(argv[0]);
-  const parent = url.URLByDeletingLastPathComponent.URLByResolvingSymlinksInPath.path.js;
-  const attributes = $.NSFileManager.defaultManager.attributesOfItemAtPathError(argv[0], null);
+  // A file reference points at the file itself, not its path, so a folder swapped after this check can't redirect the move.
+  const ref = $.NSURL.fileURLWithPath(argv[0]).fileReferenceURL;
+  if (ref.isNil()) return 'changed';
+  const now = ref.filePathURL;
+  const parent = now.URLByDeletingLastPathComponent.URLByResolvingSymlinksInPath.path.js;
+  const attributes = $.NSFileManager.defaultManager.attributesOfItemAtPathError(now.path, null);
   if (parent !== argv[1] || attributes.isNil() || String(ObjC.unwrap(attributes.objectForKey('NSFileSystemFileNumber'))) !== argv[2]) return 'changed';
   const error = Ref();
-  const ok = $.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError(url, null, error);
+  const ok = $.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError(ref, null, error);
   return ok ? 'ok' : 'blocked';  // reading the error object can crash osascript
 }
 """
@@ -1200,6 +1203,8 @@ def main():
         pass
     try:
         scanners.clear_leftover_jobs()
+        if PAYLOAD and PAYLOAD.get("key_replaced"):
+            state["key_changed"] = True  # results existed under an earlier key, even if they're now gone
         remove_unsealed_results()
         purge_expired()
         load_saved()

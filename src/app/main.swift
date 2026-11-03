@@ -60,7 +60,18 @@ private func onlyThisAppMayRead(_ item: SecKeychainItem) -> Bool {
     return true
 }
 
-private func savedDataKey() -> String? {
+// Remembered outside ~/.mac-health, so replacing the key is noticed even if the saved results were deleted first.
+// A program running as you could delete this too, so it narrows the gap rather than closing it.
+private let hadKeyMarker = "local.machealth.had-data-key"
+
+private func savedDataKey() -> (key: String, replaced: Bool)? {
+    guard let key = currentDataKey() else { return nil }
+    let replaced = key.created && UserDefaults.standard.bool(forKey: hadKeyMarker)
+    UserDefaults.standard.set(true, forKey: hadKeyMarker)
+    return (key.value, replaced)
+}
+
+private func currentDataKey() -> (value: String, created: Bool)? {
     var keychain: SecKeychain?
     let path = NSHomeDirectory() + "/Library/Keychains/login.keychain-db"
     guard SecKeychainOpen(path, &keychain) == errSecSuccess, let keychain = keychain else { return nil }
@@ -74,7 +85,7 @@ private func savedDataKey() -> String? {
     if status == errSecSuccess, let result = found as? [String: Any], let data = result[kSecValueData as String] as? Data {
         let key = String(decoding: data, as: UTF8.self)
         let wellFormed = key.count == 64 && key.allSatisfy { "0123456789abcdef".contains($0) }
-        if wellFormed, let ref = result[kSecValueRef as String], onlyThisAppMayRead(ref as! SecKeychainItem) { return key }
+        if wellFormed, let ref = result[kSecValueRef as String], onlyThisAppMayRead(ref as! SecKeychainItem) { return (key, false) }
         guard SecItemDelete(inLogin as CFDictionary) == errSecSuccess else { return nil }
     } else if status != errSecItemNotFound {
         return nil
@@ -89,7 +100,7 @@ private func savedDataKey() -> String? {
     item[kSecValueData as String] = Data(key.utf8)
     item[kSecAttrAccess as String] = access
     item[kSecUseKeychain as String] = keychain
-    return SecItemAdd(item as CFDictionary, nil) == errSecSuccess ? key : nil
+    return SecItemAdd(item as CFDictionary, nil) == errSecSuccess ? (key, true) : nil
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
@@ -176,7 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         server = process
         stdinPipe = input
         var payload: [String: Any] = ["token": token, "files": files]
-        if let key = savedDataKey() { payload["data_key"] = key }
+        if let key = savedDataKey() {
+            payload["data_key"] = key.key
+            payload["key_replaced"] = key.replaced
+        }
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             fail("Mac Health couldn't start its local service.")
             return
